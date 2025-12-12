@@ -39,12 +39,12 @@ jobs:
       - name: Run tests
         run: make test-platform-api
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.API_PLATFORM_BOT_TOKEN }}
+      # - name: Login to GitHub Container Registry
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.API_PLATFORM_BOT_TOKEN }}
 
       - name: Build and push multi arch Docker images
         run: make build-and-push-platform-api-multiarch VERSION_ARG=${{ inputs.version }}
@@ -56,7 +56,6 @@ jobs:
           git commit -am "Release platform-api version ${{ inputs.version }}"
           git tag -a platform-api-v${{ inputs.version }} -m "Platform API ${{ inputs.version }}"
           git push origin platform-api-v${{ inputs.version }}
-
 
       - name: Set to next dev version
         run: |
