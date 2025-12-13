@@ -61,4 +61,5 @@ build-and-push-multiarch: ## Build and push multi-architecture Docker image (lin
 		--build-arg VERSION=$(VERSION) \
 		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
 		-t $(IMAGE_NAME):$(VERSION) \
+		--push \
 		.
