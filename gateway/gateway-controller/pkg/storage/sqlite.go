@@ -172,10 +172,167 @@ func (s *SQLiteStorage) initSchema() error {
 			version = 4
 		}
 
-		s.logger.Info("Database schema up to date", zap.Int("version", version))
+		if version == 4 {
+			// Begin transaction for migration
+			tx, err := s.db.Begin()
+			if err != nil {
+				return fmt.Errorf("failed to begin migration transaction: %w", err)
+			}
+			defer tx.Rollback()
+
+			// SQLite doesn't support adding NOT NULL columns directly
+			// Have to recreate the table
+			if _, err := tx.Exec(`
+				CREATE TABLE deployments_new (
+					id TEXT PRIMARY KEY,
+					name TEXT NOT NULL,
+					version TEXT NOT NULL,
+					context TEXT NOT NULL,
+					kind TEXT NOT NULL,
+					handle TEXT NOT NULL UNIQUE,
+					status TEXT NOT NULL CHECK(status IN ('pending', 'deployed', 'failed')),
+					created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+					deployed_at TIMESTAMP,
+					deployed_version INTEGER NOT NULL DEFAULT 0,
+					UNIQUE(name, version)
+				);
+			`); err != nil {
+				return fmt.Errorf("failed to create deployments_new table: %w", err)
+			}
+			if _, err := tx.Exec(`
+				INSERT INTO deployments_new 
+				SELECT id, name, version, context, kind, name || '-' || version AS handle, status, created_at, updated_at, deployed_at, deployed_version 
+				FROM deployments;
+			`); err != nil {
+				return fmt.Errorf("failed to copy data to deployments_new: %w", err)
+			}
+			if _, err := tx.Exec(`DROP TABLE deployments;`); err != nil {
+				return fmt.Errorf("failed to drop old deployments table: %w", err)
+			}
+			if _, err := tx.Exec(`ALTER TABLE deployments_new RENAME TO deployments;`); err != nil {
+				return fmt.Errorf("failed to rename deployments_new to deployments: %w", err)
+			}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_name_version ON deployments(name, version);`); err != nil {
+				return fmt.Errorf("failed to recreate idx_name_version: %w", err)
+			}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_status ON deployments(status);`); err != nil {
+				return fmt.Errorf("failed to recreate idx_status: %w", err)
+			}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_context ON deployments(context);`); err != nil {
+				return fmt.Errorf("failed to recreate idx_context: %w", err)
+			}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_kind ON deployments(kind);`); err != nil {
+				return fmt.Errorf("failed to recreate idx_kind: %w", err)
+			}
+			if _, err := tx.Exec("PRAGMA user_version = 5"); err != nil {
+				return fmt.Errorf("failed to set schema version to 5: %w", err)
+			}
+
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit migration: %w", err)
+			}
+
+			s.logger.Info("Schema migrated to version 5 (handle column with NOT NULL UNIQUE constraint)")
+			version = 5
+		}
+
+		if version == 5 {
+		// Add sync tables for multi-instance coordination
+		tx, err := s.db.Begin()
+		if err != nil {
+			return fmt.Errorf("failed to begin migration transaction: %w", err)
+		}
+		defer tx.Rollback()
+
+		// Create entity_states table
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS entity_states (
+			entity_type TEXT NOT NULL,
+			organization_id TEXT NOT NULL DEFAULT 'default',
+			version_id TEXT NOT NULL,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (entity_type, organization_id)
+		);`); err != nil {
+			return fmt.Errorf("failed to create entity_states table: %w", err)
+		}
+
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_entity_states_updated ON entity_states(updated_at);`); err != nil {
+			return fmt.Errorf("failed to create entity_states index: %w", err)
+		}
+
+		// Create api_events table
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS api_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			originated_timestamp TIMESTAMP NOT NULL,
+			organization_id TEXT NOT NULL DEFAULT 'default',
+			action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+			entity_id TEXT NOT NULL,
+			event_data TEXT NOT NULL
+		);`); err != nil {
+			return fmt.Errorf("failed to create api_events table: %w", err)
+		}
+
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_api_events_lookup ON api_events(organization_id, processed_timestamp);`); err != nil {
+			return fmt.Errorf("failed to create api_events index: %w", err)
+		}
+
+		// Create certificate_events table
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS certificate_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			originated_timestamp TIMESTAMP NOT NULL,
+			organization_id TEXT NOT NULL DEFAULT 'default',
+			action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+			entity_id TEXT NOT NULL,
+			event_data TEXT NOT NULL
+		);`); err != nil {
+			return fmt.Errorf("failed to create certificate_events table: %w", err)
+		}
+
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_cert_events_lookup ON certificate_events(organization_id, processed_timestamp);`); err != nil {
+			return fmt.Errorf("failed to create certificate_events index: %w", err)
+		}
+
+		// Create llm_template_events table
+		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS llm_template_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			originated_timestamp TIMESTAMP NOT NULL,
+			organization_id TEXT NOT NULL DEFAULT 'default',
+			action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+			entity_id TEXT NOT NULL,
+			event_data TEXT NOT NULL
+		);`); err != nil {
+			return fmt.Errorf("failed to create llm_template_events table: %w", err)
+		}
+
+		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_llm_events_lookup ON llm_template_events(organization_id, processed_timestamp);`); err != nil {
+			return fmt.Errorf("failed to create llm_template_events index: %w", err)
+		}
+
+		if _, err := tx.Exec("PRAGMA user_version = 6"); err != nil {
+			return fmt.Errorf("failed to set schema version to 6: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit migration: %w", err)
+		}
+
+		s.logger.Info("Schema migrated to version 6 (multi-instance sync tables)")
+		version = 6
+	}
+
+	s.logger.Info("Database schema up to date", zap.Int("version", version))
 	}
 
 	return nil
+}
+
+// GetDB returns the underlying database connection for advanced operations
+// This is used by the sync package to perform transactional event recording
+func (s *SQLiteStorage) GetDB() *sql.DB {
+	return s.db
 }
 
 // SaveConfig persists a new deployment configuration

@@ -47,6 +47,7 @@ type GatewayController struct {
 	PolicyServer PolicyServerConfig `koanf:"policyserver"`
 	Policies     PoliciesConfig     `koanf:"policies"`
 	LLM          LLMConfig          `koanf:"llm"`
+	Sync         SyncConfig         `koanf:"sync"`
 }
 
 // ServerConfig holds server-related configuration
@@ -77,6 +78,15 @@ type PoliciesConfig struct {
 
 type LLMConfig struct {
 	TemplateDefinitionsPath string `koanf:"template_definitions_path"`
+}
+
+// SyncConfig holds multi-instance synchronization configuration
+type SyncConfig struct {
+	Enabled        bool          `koanf:"enabled"`          // Enable multi-instance sync (default: false)
+	PollInterval   time.Duration `koanf:"poll_interval"`    // How often to poll for changes (default: 5s)
+	JitterMax      time.Duration `koanf:"jitter_max"`       // Max jitter to add between polls (default: 1s)
+	EventRetention time.Duration `koanf:"event_retention"`  // How long to keep events (default: 24h)
+	OrganizationID string        `koanf:"organization_id"`  // Organization ID for multi-tenancy (default: "default")
 }
 
 // StorageConfig holds storage-related configuration
@@ -295,6 +305,13 @@ func defaultConfig() *Config {
 			},
 			LLM: LLMConfig{
 				TemplateDefinitionsPath: "./default-llm-provider-templates",
+			},
+			Sync: SyncConfig{
+				Enabled:        false,
+				PollInterval:   5 * time.Second,
+				JitterMax:      1 * time.Second,
+				EventRetention: 24 * time.Hour,
+				OrganizationID: "default",
 			},
 			Storage: StorageConfig{
 				Type: "memory",

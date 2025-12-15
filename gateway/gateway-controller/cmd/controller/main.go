@@ -21,6 +21,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/sync"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/utils"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/xds"
 	policyenginev1 "github.com/wso2/api-platform/sdk/gateway/policyengine/v1"
@@ -94,6 +95,35 @@ func main() {
 		log.Info("Running in memory-only mode (no persistent storage)")
 	}
 
+	// Initialize sync components if enabled
+	var syncPoller sync.SyncPoller
+	var eventProcessor *sync.EventProcessor
+	if cfg.GatewayController.Sync.Enabled && cfg.IsPersistentMode() && db != nil {
+		log.Info("Multi-instance synchronization enabled")
+
+		// Get raw DB connection
+		sqliteStorage, ok := db.(*storage.SQLiteStorage)
+		if !ok {
+			log.Fatal("Sync is only supported with SQLite storage currently")
+		}
+		rawDB := sqliteStorage.GetDB()
+
+		// Initialize sync components
+		stateManager := sync.NewStateManager(rawDB, log)
+		eventStore := sync.NewSQLiteEventStore(rawDB, log)
+
+		// Wrap storage with sync-aware version
+		db = sync.NewSyncAwareStorage(db, rawDB, stateManager, eventStore,
+			cfg.GatewayController.Sync.OrganizationID, log)
+
+		// Create sync poller (will be started after configStore and snapshotManager are created)
+		syncPoller = sync.NewSyncPoller(stateManager, eventStore, log, sync.SyncPollerConfig{
+			PollInterval:   cfg.GatewayController.Sync.PollInterval,
+			JitterMax:      cfg.GatewayController.Sync.JitterMax,
+			OrganizationID: cfg.GatewayController.Sync.OrganizationID,
+		})
+	}
+
 	// Initialize in-memory config store
 	configStore := storage.NewConfigStore()
 
@@ -130,6 +160,18 @@ func main() {
 			log.Info("SDS secret manager initialized successfully")
 			// Set the SDS secret manager in snapshot manager so secrets are included in snapshots
 			snapshotManager.SetSDSSecretManager(sdsSecretManager)
+		}
+	}
+
+	// Start sync poller if enabled
+	if syncPoller != nil {
+		eventProcessor = sync.NewEventProcessor(configStore, snapshotManager, log)
+		syncPoller.RegisterCallback(sync.EntityTypeAPI, eventProcessor.ProcessAPIEvents)
+		syncPoller.RegisterCallback(sync.EntityTypeCertificate, eventProcessor.ProcessCertificateEvents)
+		syncPoller.RegisterCallback(sync.EntityTypeLLMTemplate, eventProcessor.ProcessLLMTemplateEvents)
+
+		if err := syncPoller.Start(context.Background()); err != nil {
+			log.Fatal("Failed to start sync poller", zap.Error(err))
 		}
 	}
 
@@ -296,6 +338,11 @@ func main() {
 
 	// Stop control plane client first
 	cpClient.Stop()
+
+	// Stop sync poller if it was started
+	if syncPoller != nil {
+		syncPoller.Stop()
+	}
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Error("Server forced to shutdown", zap.Error(err))
