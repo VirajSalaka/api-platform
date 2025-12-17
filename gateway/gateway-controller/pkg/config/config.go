@@ -47,6 +47,7 @@ type GatewayController struct {
 	PolicyServer PolicyServerConfig `koanf:"policyserver"`
 	Policies     PoliciesConfig     `koanf:"policies"`
 	LLM          LLMConfig          `koanf:"llm"`
+	Sync         SyncConfig         `koanf:"sync"`
 }
 
 // ServerConfig holds server-related configuration
@@ -77,6 +78,14 @@ type PoliciesConfig struct {
 
 type LLMConfig struct {
 	TemplateDefinitionsPath string `koanf:"template_definitions_path"`
+}
+
+// SyncConfig holds multi-instance synchronization configuration
+type SyncConfig struct {
+	Enabled        bool          `koanf:"enabled"`         // Enable multi-instance synchronization
+	PollInterval   time.Duration `koanf:"poll_interval"`   // Polling interval for checking state changes
+	JitterMax      time.Duration `koanf:"jitter_max"`      // Maximum jitter to add to poll interval
+	EventRetention time.Duration `koanf:"event_retention"` // How long to retain events before cleanup
 }
 
 // StorageConfig holds storage-related configuration
@@ -386,6 +395,12 @@ func defaultConfig() *Config {
 			Logging: LoggingConfig{
 				Level:  "info",
 				Format: "json",
+			},
+			Sync: SyncConfig{
+				Enabled:        false,            // Disabled by default
+				PollInterval:   5 * time.Second,  // Poll every 5 seconds
+				JitterMax:      1 * time.Second,  // Up to 1 second jitter
+				EventRetention: 24 * time.Hour,   // Retain events for 24 hours
 			},
 			ControlPlane: ControlPlaneConfig{
 				Host:               "localhost:8443",

@@ -21,6 +21,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/sync"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/utils"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/xds"
 	policyenginev1 "github.com/wso2/api-platform/sdk/gateway/policyengine/v1"
@@ -94,6 +95,39 @@ func main() {
 		log.Info("Running in memory-only mode (no persistent storage)")
 	}
 
+	// Initialize sync components if enabled and in persistent mode
+	var syncPoller *sync.SyncPoller
+	if cfg.GatewayController.Sync.Enabled && cfg.IsPersistentMode() {
+		log.Info("Multi-instance synchronization enabled",
+			zap.Duration("poll_interval", cfg.GatewayController.Sync.PollInterval),
+			zap.Duration("jitter_max", cfg.GatewayController.Sync.JitterMax),
+			zap.Duration("event_retention", cfg.GatewayController.Sync.EventRetention))
+
+		// Get raw DB connection (only SQLite storage implements GetDB() for now)
+		sqliteStorage, ok := db.(*storage.SQLiteStorage)
+		if !ok {
+			log.Fatal("Sync is only supported with SQLite storage currently")
+		}
+		rawDB := sqliteStorage.GetDB()
+
+		// Initialize sync components
+		stateManager := sync.NewStateManager(rawDB, log)
+		eventStore := sync.NewEventStore(cfg.GatewayController.Storage.Type, rawDB, log)
+
+		// Wrap storage with sync-aware version
+		db = sync.NewSyncAwareStorage(db, rawDB, stateManager, eventStore, log)
+
+		// Create sync poller (will be started after snapshotManager is ready)
+		syncPoller = sync.NewSyncPoller(
+			stateManager,
+			eventStore,
+			cfg.GatewayController.Sync.PollInterval,
+			cfg.GatewayController.Sync.JitterMax,
+			cfg.GatewayController.Sync.EventRetention,
+			log,
+		)
+	}
+
 	// Initialize in-memory config store
 	configStore := storage.NewConfigStore()
 
@@ -148,6 +182,17 @@ func main() {
 			log.Fatal("xDS server failed", zap.Error(err))
 		}
 	}()
+
+	// Start sync poller if configured
+	if syncPoller != nil {
+		eventProcessor := sync.NewEventProcessor(configStore, snapshotManager, log)
+		syncPoller.RegisterCallback(sync.EntityTypeAPI, eventProcessor.ProcessAPIEvents)
+
+		if err := syncPoller.Start(context.Background()); err != nil {
+			log.Fatal("Failed to start sync poller", zap.Error(err))
+		}
+		log.Info("Sync poller started successfully")
+	}
 
 	// Initialize policy store and start policy xDS server if enabled
 	var policyXDSServer *policyxds.Server
@@ -306,6 +351,15 @@ func main() {
 	// Stop policy xDS server if it was started
 	if policyXDSServer != nil {
 		policyXDSServer.Stop()
+	}
+
+	// Stop sync poller if it was started
+	if syncPoller != nil {
+		if err := syncPoller.Stop(); err != nil {
+			log.Error("Failed to stop sync poller", zap.Error(err))
+		} else {
+			log.Info("Sync poller stopped")
+		}
 	}
 
 	log.Info("Gateway-Controller stopped")

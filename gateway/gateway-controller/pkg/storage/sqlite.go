@@ -237,6 +237,39 @@ func (s *SQLiteStorage) initSchema() error {
 			version = 5
 		}
 
+		if version == 5 {
+			// Add entity_states and api_events tables for multi-instance synchronization
+			if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS entity_states (
+				entity_type TEXT NOT NULL PRIMARY KEY,
+				version_id TEXT NOT NULL,
+				updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+			);`); err != nil {
+				return fmt.Errorf("failed to create entity_states table: %w", err)
+			}
+
+			if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS api_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				originated_timestamp TIMESTAMP NOT NULL,
+				action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+				entity_id TEXT NOT NULL,
+				event_data TEXT NOT NULL
+			);`); err != nil {
+				return fmt.Errorf("failed to create api_events table: %w", err)
+			}
+
+			if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_api_events_lookup ON api_events(processed_timestamp);`); err != nil {
+				return fmt.Errorf("failed to create api_events index: %w", err)
+			}
+
+			if _, err := s.db.Exec("PRAGMA user_version = 6"); err != nil {
+				return fmt.Errorf("failed to set schema version to 6: %w", err)
+			}
+
+			s.logger.Info("Schema migrated to version 6 (multi-instance synchronization)")
+			version = 6
+		}
+
 		s.logger.Info("Database schema up to date", zap.Int("version", version))
 	}
 
@@ -1103,6 +1136,11 @@ func (s *SQLiteStorage) DeleteCertificate(id string) error {
 	s.logger.Info("Certificate deleted", zap.String("id", id))
 
 	return nil
+}
+
+// GetDB returns the underlying sql.DB connection for use by sync components
+func (s *SQLiteStorage) GetDB() *sql.DB {
+	return s.db
 }
 
 // Close closes the database connection
