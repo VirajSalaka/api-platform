@@ -19,6 +19,8 @@
 package storage
 
 import (
+	"time"
+
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 )
 
@@ -73,6 +75,13 @@ type Storage interface {
 	// Returns an error if the configuration does not exist.
 	// Implementations should ensure this operation is atomic and thread-safe.
 	UpdateConfig(cfg *models.StoredConfig) error
+
+	// UpdateDeploymentStatus updates only the deployment status fields of an existing configuration.
+	// Updates: status, deployed_at, deployed_version, updated_at
+	//
+	// Returns an error if the configuration does not exist.
+	// This is more efficient than UpdateConfig when only status fields need updating.
+	UpdateDeploymentStatus(id string, status models.ConfigStatus, deployedAt *time.Time, deployedVersion int64) error
 
 	// DeleteConfig removes an API configuration by ID.
 	//

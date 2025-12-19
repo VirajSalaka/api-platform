@@ -137,8 +137,8 @@ func (s *APIServer) handleStatusUpdate(configID string, success bool, version in
 
 	// Update database (only if persistent mode)
 	if s.db != nil {
-		if err := s.db.UpdateConfig(cfg); err != nil {
-			log.Error("Failed to update config status in database", zap.Error(err), zap.String("id", configID))
+		if err := s.db.UpdateDeploymentStatus(configID, cfg.Status, cfg.DeployedAt, cfg.DeployedVersion); err != nil {
+			log.Error("Failed to update deployment status in database", zap.Error(err), zap.String("id", configID))
 		}
 	}
 

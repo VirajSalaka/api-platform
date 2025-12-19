@@ -480,6 +480,36 @@ func (s *SQLiteStorage) UpdateConfig(cfg *models.StoredConfig) error {
 	return nil
 }
 
+// UpdateDeploymentStatus updates only the deployment status fields of an existing configuration
+func (s *SQLiteStorage) UpdateDeploymentStatus(id string, status models.ConfigStatus, deployedAt *time.Time, deployedVersion int64) error {
+	query := `
+		UPDATE deployments
+		SET status = ?, deployed_at = ?, deployed_version = ?, updated_at = ?
+		WHERE id = ?
+	`
+
+	result, err := s.db.Exec(query, status, deployedAt, deployedVersion, time.Now(), id)
+	if err != nil {
+		return fmt.Errorf("failed to update deployment status: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rows == 0 {
+		return fmt.Errorf("%w: id=%s", ErrNotFound, id)
+	}
+
+	s.logger.Info("Deployment status updated",
+		zap.String("id", id),
+		zap.String("status", string(status)),
+		zap.Int64("deployedVersion", deployedVersion))
+
+	return nil
+}
+
 // DeleteConfig removes an deployment configuration by ID
 func (s *SQLiteStorage) DeleteConfig(id string) error {
 	query := `DELETE FROM deployments WHERE id = ?`
