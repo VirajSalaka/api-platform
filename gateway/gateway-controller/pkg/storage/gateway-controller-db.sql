@@ -1,6 +1,6 @@
 -- SQLite Schema for Gateway-Controller API Configurations
--- Version: 1.0
--- Description: Persistent storage for API configurations with lifecycle metadata
+-- Version: 6.0
+-- Description: Persistent storage for API configurations with lifecycle metadata and multi-instance sync support
 
 -- Main table for deployments
 CREATE TABLE IF NOT EXISTS deployments (
@@ -103,5 +103,59 @@ CREATE TABLE IF NOT EXISTS llm_provider_templates (
 -- Index for fast name lookups
 CREATE INDEX IF NOT EXISTS idx_template_handle ON llm_provider_templates(handle);
 
--- Set schema version to 4
-PRAGMA user_version = 4;
+-- Entity States table (added in schema version 6)
+-- Tracks the current version for each entity type per organization
+CREATE TABLE IF NOT EXISTS entity_states (
+    entity_type TEXT NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT 'default',
+    version_id TEXT NOT NULL,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (entity_type, organization_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_states_updated ON entity_states(updated_at);
+
+-- API Events table (added in schema version 6)
+-- Stores events for API entity changes
+CREATE TABLE IF NOT EXISTS api_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    originated_timestamp TIMESTAMP NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT 'default',
+    action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+    entity_id TEXT NOT NULL,
+    event_data TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_events_lookup ON api_events(organization_id, processed_timestamp);
+
+-- Certificate Events table (added in schema version 6)
+-- Stores events for certificate entity changes
+CREATE TABLE IF NOT EXISTS certificate_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    originated_timestamp TIMESTAMP NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT 'default',
+    action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+    entity_id TEXT NOT NULL,
+    event_data TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cert_events_lookup ON certificate_events(organization_id, processed_timestamp);
+
+-- LLM Template Events table (added in schema version 6)
+-- Stores events for LLM template entity changes
+CREATE TABLE IF NOT EXISTS llm_template_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    originated_timestamp TIMESTAMP NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT 'default',
+    action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+    entity_id TEXT NOT NULL,
+    event_data TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_events_lookup ON llm_template_events(organization_id, processed_timestamp);
+
+-- Set schema version to 6
+PRAGMA user_version = 6;
