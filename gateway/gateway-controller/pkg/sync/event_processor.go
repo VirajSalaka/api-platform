@@ -33,6 +33,7 @@ import (
 // EventProcessor handles applying sync events to local state
 type EventProcessor struct {
 	configStore     *storage.ConfigStore
+	storage         storage.Storage
 	snapshotManager *xds.SnapshotManager
 	logger          *zap.Logger
 }
@@ -40,11 +41,13 @@ type EventProcessor struct {
 // NewEventProcessor creates a new EventProcessor
 func NewEventProcessor(
 	configStore *storage.ConfigStore,
+	storage storage.Storage,
 	snapshotManager *xds.SnapshotManager,
 	logger *zap.Logger,
 ) *EventProcessor {
 	return &EventProcessor{
 		configStore:     configStore,
+		storage:         storage,
 		snapshotManager: snapshotManager,
 		logger:          logger,
 	}
@@ -88,14 +91,14 @@ func (ep *EventProcessor) processAPIEvent(event Event) error {
 			return fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 
-		// Check if config already exists
-		existing, err := ep.configStore.Get(cfg.ID)
+		// Check if config exists in DATABASE (source of truth)
+		existing, err := ep.storage.GetConfig(cfg.ID)
 		if err == nil && existing != nil {
-			// Update existing
-			return ep.configStore.Update(&cfg)
+			// Update existing in in-memory store
+			return ep.configStore.Update(existing)
 		}
-		// Add new
-		return ep.configStore.Add(&cfg)
+		// Add new to in-memory store
+		return ep.configStore.Add(existing)
 
 	case ActionDelete:
 		return ep.configStore.Delete(event.EntityID)

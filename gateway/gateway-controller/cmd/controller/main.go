@@ -165,7 +165,7 @@ func main() {
 
 	// Start sync poller if enabled
 	if syncPoller != nil {
-		eventProcessor = sync.NewEventProcessor(configStore, snapshotManager, log)
+		eventProcessor = sync.NewEventProcessor(configStore, db, snapshotManager, log)
 		syncPoller.RegisterCallback(sync.EntityTypeAPI, eventProcessor.ProcessAPIEvents)
 		syncPoller.RegisterCallback(sync.EntityTypeCertificate, eventProcessor.ProcessCertificateEvents)
 		syncPoller.RegisterCallback(sync.EntityTypeLLMTemplate, eventProcessor.ProcessLLMTemplateEvents)
