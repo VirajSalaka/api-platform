@@ -18,6 +18,7 @@
             "request": "launch",
             "mode": "auto",
             "program": "${workspaceFolder}/gateway/gateway-controller/cmd/controller/main.go",
+            "dlvFlags": ["--check-go-version=false"],
             "args": [
                 "-config",
                 "${workspaceFolder}/gateway/gateway-controller/config/config.yaml",

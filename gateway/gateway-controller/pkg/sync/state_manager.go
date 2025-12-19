@@ -32,14 +32,12 @@ import (
 type stateManager struct {
 	db     *sql.DB
 	logger *zap.Logger
-	readDb *sql.DB
 }
 
 // NewStateManager creates a new StateManager instance
-func NewStateManager(db *sql.DB, readDb *sql.DB, logger *zap.Logger) StateManager {
+func NewStateManager(db *sql.DB, logger *zap.Logger) StateManager {
 	return &stateManager{
 		db:     db,
-		readDb: readDb,
 		logger: logger,
 	}
 }
@@ -51,7 +49,7 @@ func (sm *stateManager) GetState(ctx context.Context, entityType EntityType, org
 	          WHERE entity_type = ? AND organization_id = ?`
 
 	var state EntityState
-	err := sm.readDb.QueryRowContext(ctx, query, string(entityType), orgID).Scan(
+	err := sm.db.QueryRowContext(ctx, query, string(entityType), orgID).Scan(
 		&state.EntityType,
 		&state.OrganizationID,
 		&state.VersionID,
@@ -100,7 +98,7 @@ func (sm *stateManager) GetAllStates(ctx context.Context, orgID string) ([]Entit
 	          FROM entity_states
 	          WHERE organization_id = ?`
 
-	rows, err := sm.readDb.QueryContext(ctx, query, orgID)
+	rows, err := sm.db.QueryContext(ctx, query, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all states: %w", err)
 	}

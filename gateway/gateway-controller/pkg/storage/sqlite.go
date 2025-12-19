@@ -36,7 +36,6 @@ var schemaSQL string
 
 // SQLiteStorage implements the Storage interface using SQLite
 type SQLiteStorage struct {
-	readDb *sql.DB
 	db     *sql.DB
 	logger *zap.Logger
 }
@@ -51,10 +50,6 @@ func NewSQLiteStorage(dbPath string, logger *zap.Logger) (*SQLiteStorage, error)
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	readDSN := dsn + "&mode=ro"
-	readDb, _ := sql.Open("sqlite3", readDSN)
-	readDb.SetMaxOpenConns(10)
-
 	// CRITICAL: Prevents "database is locked" errors with concurrent access
 	db.SetMaxOpenConns(2)
 	db.SetMaxIdleConns(2)
@@ -63,7 +58,6 @@ func NewSQLiteStorage(dbPath string, logger *zap.Logger) (*SQLiteStorage, error)
 	storage := &SQLiteStorage{
 		db:     db,
 		logger: logger,
-		readDb: readDb,
 	}
 
 	// Initialize schema if needed
@@ -339,12 +333,6 @@ func (s *SQLiteStorage) initSchema() error {
 // This is used by the sync package to perform transactional event recording
 func (s *SQLiteStorage) GetDB() *sql.DB {
 	return s.db
-}
-
-// GetReadDB returns the underlying database connection for read operations
-// This is used by the sync package to perform transactional event recording
-func (s *SQLiteStorage) GetReadDB() *sql.DB {
-	return s.readDb
 }
 
 // SaveConfig persists a new deployment configuration
