@@ -19,7 +19,6 @@
 package utils
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -268,18 +267,19 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 			zap.String("correlation_id", params.CorrelationID))
 	}
 
+	// TODO: (VirajSalaka) Conditionally enable if sync is disabled
 	// Update xDS snapshot asynchronously
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	// go func() {
+	// 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 	defer cancel()
 
-		if err := s.snapshotManager.UpdateSnapshot(ctx, params.CorrelationID); err != nil {
-			params.Logger.Error("Failed to update xDS snapshot",
-				zap.Error(err),
-				zap.String("api_id", apiID),
-				zap.String("correlation_id", params.CorrelationID))
-		}
-	}()
+	// 	if err := s.snapshotManager.UpdateSnapshot(ctx, params.CorrelationID); err != nil {
+	// 		params.Logger.Error("Failed to update xDS snapshot",
+	// 			zap.Error(err),
+	// 			zap.String("api_id", apiID),
+	// 			zap.String("correlation_id", params.CorrelationID))
+	// 	}
+	// }()
 
 	return &APIDeploymentResult{
 		StoredConfig: storedCfg,

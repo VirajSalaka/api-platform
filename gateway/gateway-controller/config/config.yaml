@@ -12,6 +12,19 @@ gateway_controller:
     # Graceful shutdown timeout
     shutdown_timeout: 15s
 
+  sync:
+    # Enable or disable configuration synchronization
+    enabled: true
+
+    # Poll interval for checking configuration updates
+    poll_interval: 5s
+
+    # Maximum jitter to add to poll interval
+    jitter_max: 1s
+
+    # Retention duration for sync events
+    event_retention: 4h    
+
   # Policy xDS Server configuration
   policyserver:
     # Enable or disable the policy xDS server

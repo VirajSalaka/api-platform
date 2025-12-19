@@ -36,6 +36,7 @@ var schemaSQL string
 
 // SQLiteStorage implements the Storage interface using SQLite
 type SQLiteStorage struct {
+	readDb *sql.DB
 	db     *sql.DB
 	logger *zap.Logger
 }
@@ -50,14 +51,19 @@ func NewSQLiteStorage(dbPath string, logger *zap.Logger) (*SQLiteStorage, error)
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	readDSN := dsn + "&mode=ro"
+	readDb, _ := sql.Open("sqlite3", readDSN)
+	readDb.SetMaxOpenConns(10)
+
 	// CRITICAL: Prevents "database is locked" errors with concurrent access
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(0)
 
 	storage := &SQLiteStorage{
 		db:     db,
 		logger: logger,
+		readDb: readDb,
 	}
 
 	// Initialize schema if needed
@@ -238,30 +244,30 @@ func (s *SQLiteStorage) initSchema() error {
 		}
 
 		if version == 5 {
-		// Add sync tables for multi-instance coordination
-		tx, err := s.db.Begin()
-		if err != nil {
-			return fmt.Errorf("failed to begin migration transaction: %w", err)
-		}
-		defer tx.Rollback()
+			// Add sync tables for multi-instance coordination
+			tx, err := s.db.Begin()
+			if err != nil {
+				return fmt.Errorf("failed to begin migration transaction: %w", err)
+			}
+			defer tx.Rollback()
 
-		// Create entity_states table
-		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS entity_states (
+			// Create entity_states table
+			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS entity_states (
 			entity_type TEXT NOT NULL,
 			organization_id TEXT NOT NULL DEFAULT 'default',
 			version_id TEXT NOT NULL,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (entity_type, organization_id)
 		);`); err != nil {
-			return fmt.Errorf("failed to create entity_states table: %w", err)
-		}
+				return fmt.Errorf("failed to create entity_states table: %w", err)
+			}
 
-		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_entity_states_updated ON entity_states(updated_at);`); err != nil {
-			return fmt.Errorf("failed to create entity_states index: %w", err)
-		}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_entity_states_updated ON entity_states(updated_at);`); err != nil {
+				return fmt.Errorf("failed to create entity_states index: %w", err)
+			}
 
-		// Create api_events table
-		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS api_events (
+			// Create api_events table
+			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS api_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			originated_timestamp TIMESTAMP NOT NULL,
@@ -270,15 +276,15 @@ func (s *SQLiteStorage) initSchema() error {
 			entity_id TEXT NOT NULL,
 			event_data TEXT NOT NULL
 		);`); err != nil {
-			return fmt.Errorf("failed to create api_events table: %w", err)
-		}
+				return fmt.Errorf("failed to create api_events table: %w", err)
+			}
 
-		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_api_events_lookup ON api_events(organization_id, processed_timestamp);`); err != nil {
-			return fmt.Errorf("failed to create api_events index: %w", err)
-		}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_api_events_lookup ON api_events(organization_id, processed_timestamp);`); err != nil {
+				return fmt.Errorf("failed to create api_events index: %w", err)
+			}
 
-		// Create certificate_events table
-		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS certificate_events (
+			// Create certificate_events table
+			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS certificate_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			originated_timestamp TIMESTAMP NOT NULL,
@@ -287,15 +293,15 @@ func (s *SQLiteStorage) initSchema() error {
 			entity_id TEXT NOT NULL,
 			event_data TEXT NOT NULL
 		);`); err != nil {
-			return fmt.Errorf("failed to create certificate_events table: %w", err)
-		}
+				return fmt.Errorf("failed to create certificate_events table: %w", err)
+			}
 
-		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_cert_events_lookup ON certificate_events(organization_id, processed_timestamp);`); err != nil {
-			return fmt.Errorf("failed to create certificate_events index: %w", err)
-		}
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_cert_events_lookup ON certificate_events(organization_id, processed_timestamp);`); err != nil {
+				return fmt.Errorf("failed to create certificate_events index: %w", err)
+			}
 
-		// Create llm_template_events table
-		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS llm_template_events (
+			// Create llm_template_events table
+			if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS llm_template_events (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			originated_timestamp TIMESTAMP NOT NULL,
@@ -304,26 +310,26 @@ func (s *SQLiteStorage) initSchema() error {
 			entity_id TEXT NOT NULL,
 			event_data TEXT NOT NULL
 		);`); err != nil {
-			return fmt.Errorf("failed to create llm_template_events table: %w", err)
+				return fmt.Errorf("failed to create llm_template_events table: %w", err)
+			}
+
+			if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_llm_events_lookup ON llm_template_events(organization_id, processed_timestamp);`); err != nil {
+				return fmt.Errorf("failed to create llm_template_events index: %w", err)
+			}
+
+			if _, err := tx.Exec("PRAGMA user_version = 6"); err != nil {
+				return fmt.Errorf("failed to set schema version to 6: %w", err)
+			}
+
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("failed to commit migration: %w", err)
+			}
+
+			s.logger.Info("Schema migrated to version 6 (multi-instance sync tables)")
+			version = 6
 		}
 
-		if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_llm_events_lookup ON llm_template_events(organization_id, processed_timestamp);`); err != nil {
-			return fmt.Errorf("failed to create llm_template_events index: %w", err)
-		}
-
-		if _, err := tx.Exec("PRAGMA user_version = 6"); err != nil {
-			return fmt.Errorf("failed to set schema version to 6: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit migration: %w", err)
-		}
-
-		s.logger.Info("Schema migrated to version 6 (multi-instance sync tables)")
-		version = 6
-	}
-
-	s.logger.Info("Database schema up to date", zap.Int("version", version))
+		s.logger.Info("Database schema up to date", zap.Int("version", version))
 	}
 
 	return nil
@@ -333,6 +339,12 @@ func (s *SQLiteStorage) initSchema() error {
 // This is used by the sync package to perform transactional event recording
 func (s *SQLiteStorage) GetDB() *sql.DB {
 	return s.db
+}
+
+// GetReadDB returns the underlying database connection for read operations
+// This is used by the sync package to perform transactional event recording
+func (s *SQLiteStorage) GetReadDB() *sql.DB {
+	return s.readDb
 }
 
 // SaveConfig persists a new deployment configuration

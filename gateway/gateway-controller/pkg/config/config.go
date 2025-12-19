@@ -32,8 +32,8 @@ import (
 
 // Config holds all configuration for the gateway-controller
 type Config struct {
-	GatewayController GatewayController `koanf:"gateway_controller"`
-	PolicyEngine map[string]interface{}    `koanf:"policy_engine"`
+	GatewayController    GatewayController      `koanf:"gateway_controller"`
+	PolicyEngine         map[string]interface{} `koanf:"policy_engine"`
 	PolicyConfigurations map[string]interface{} `koanf:"policy_configurations"`
 }
 
@@ -82,11 +82,11 @@ type LLMConfig struct {
 
 // SyncConfig holds multi-instance synchronization configuration
 type SyncConfig struct {
-	Enabled        bool          `koanf:"enabled"`          // Enable multi-instance sync (default: false)
-	PollInterval   time.Duration `koanf:"poll_interval"`    // How often to poll for changes (default: 5s)
-	JitterMax      time.Duration `koanf:"jitter_max"`       // Max jitter to add between polls (default: 1s)
-	EventRetention time.Duration `koanf:"event_retention"`  // How long to keep events (default: 24h)
-	OrganizationID string        `koanf:"organization_id"`  // Organization ID for multi-tenancy (default: "default")
+	Enabled        bool          `koanf:"enabled"`         // Enable multi-instance sync (default: false)
+	PollInterval   time.Duration `koanf:"poll_interval"`   // How often to poll for changes (default: 5s)
+	JitterMax      time.Duration `koanf:"jitter_max"`      // Max jitter to add between polls (default: 1s)
+	EventRetention time.Duration `koanf:"event_retention"` // How long to keep events (default: 24h)
+	OrganizationID string        `koanf:"organization_id"` // Organization ID for multi-tenancy (default: "default")
 }
 
 // StorageConfig holds storage-related configuration
@@ -290,7 +290,7 @@ func LoadConfig(configPath string) (*Config, error) {
 // defaultConfig returns a Config struct with default configuration values
 func defaultConfig() *Config {
 	return &Config{
-		GatewayController: GatewayController {
+		GatewayController: GatewayController{
 			Server: ServerConfig{
 				APIPort:         9090,
 				XDSPort:         18000,
@@ -307,7 +307,7 @@ func defaultConfig() *Config {
 				TemplateDefinitionsPath: "./default-llm-provider-templates",
 			},
 			Sync: SyncConfig{
-				Enabled:        false,
+				Enabled:        true,
 				PollInterval:   5 * time.Second,
 				JitterMax:      1 * time.Second,
 				EventRetention: 24 * time.Hour,
