@@ -76,7 +76,10 @@ func (s *SyncAwareStorage) SaveConfig(cfg *models.StoredConfig) error {
 	}
 
 	// Record event
-	eventData, err := json.Marshal(cfg)
+	eventData, err := json.Marshal(&ConfigEventData{
+		ID:     cfg.ID,
+		Handle: cfg.Configuration.Metadata.Name,
+	})
 	if err != nil {
 		return err
 	}
@@ -114,7 +117,10 @@ func (s *SyncAwareStorage) UpdateConfig(cfg *models.StoredConfig) error {
 		return err
 	}
 
-	eventData, err := json.Marshal(cfg)
+	eventData, err := json.Marshal(&ConfigEventData{
+		ID:     cfg.ID,
+		Handle: cfg.Configuration.Metadata.Name,
+	})
 	if err != nil {
 		return err
 	}
@@ -151,12 +157,20 @@ func (s *SyncAwareStorage) DeleteConfig(id string) error {
 		return err
 	}
 
+	eventData, err := json.Marshal(&ConfigEventData{
+		ID:     id,
+		Handle: "",
+	})
+	if err != nil {
+		return err
+	}
+
 	event := &Event{
 		OriginatedTimestamp: time.Now(),
 		OrganizationID:      s.organizationID,
 		Action:              ActionDelete,
 		EntityID:            id,
-		EventData:           []byte(`{}`),
+		EventData:           eventData,
 	}
 	if err := s.eventStore.RecordEvent(ctx, EntityTypeAPI, event); err != nil {
 		return err

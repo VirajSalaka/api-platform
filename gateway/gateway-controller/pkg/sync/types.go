@@ -66,6 +66,12 @@ type Event struct {
 	EventData           []byte // JSON serialized entity data
 }
 
+// ConfigEventData represents the minimal config data stored in sync events
+type ConfigEventData struct {
+	ID     string `json:"id"`
+	Handle string `json:"handle"`
+}
+
 // StateManager handles entity state versioning for detecting changes across instances
 type StateManager interface {
 	// GetState retrieves the current state for an entity type
