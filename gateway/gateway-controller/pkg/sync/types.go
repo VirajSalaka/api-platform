@@ -72,6 +72,18 @@ type ConfigEventData struct {
 	Handle string `json:"handle"`
 }
 
+// CertificateEventData represents the minimal certificate data stored in sync events
+type CertificateEventData struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// LLMTemplateEventData represents the minimal LLM template data stored in sync events
+type LLMTemplateEventData struct {
+	ID     string `json:"id"`
+	Handle string `json:"handle"`
+}
+
 // StateManager handles entity state versioning for detecting changes across instances
 type StateManager interface {
 	// GetState retrieves the current state for an entity type

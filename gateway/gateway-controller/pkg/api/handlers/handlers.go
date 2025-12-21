@@ -1832,17 +1832,18 @@ func (s *APIServer) UpdateMCPProxy(c *gin.Context, id string) {
 	}
 
 	// Get correlation ID from context
-	correlationID := middleware.GetCorrelationID(c)
+	// correlationID := middleware.GetCorrelationID(c)
 
+	// TODO: (VirajSalaka) Conditionally enable
 	// Update xDS snapshot asynchronously
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	// go func() {
+	// 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 	defer cancel()
 
-		if err := s.snapshotManager.UpdateSnapshot(ctx, correlationID); err != nil {
-			log.Error("Failed to update xDS snapshot", zap.Error(err))
-		}
-	}()
+	// 	if err := s.snapshotManager.UpdateSnapshot(ctx, correlationID); err != nil {
+	// 		log.Error("Failed to update xDS snapshot", zap.Error(err))
+	// 	}
+	// }()
 
 	log.Info("MCP configuration updated",
 		zap.String("id", existing.ID),
@@ -1945,18 +1946,20 @@ func (s *APIServer) DeleteMCPProxy(c *gin.Context, id string) {
 	}
 
 	// Get correlation ID from context
-	correlationID := middleware.GetCorrelationID(c)
+	// correlationID := middleware.GetCorrelationID(c)
 
-	// Update xDS snapshot asynchronously
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	// TODO: (VirajSalaka) Conditionally enable
+	// // Update xDS snapshot asynchronously
+	// go func() {
+	// 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 	defer cancel()
 
-		if err := s.snapshotManager.UpdateSnapshot(ctx, correlationID); err != nil {
-			log.Error("Failed to update xDS snapshot", zap.Error(err))
-		}
-	}()
+	// 	if err := s.snapshotManager.UpdateSnapshot(ctx, correlationID); err != nil {
+	// 		log.Error("Failed to update xDS snapshot", zap.Error(err))
+	// 	}
+	// }()
 
+	// TODO: (VirajSalaka) Fix Policies
 	// Remove derived policy configuration
 	if s.policyManager != nil {
 		policyID := cfg.ID + "-policies"

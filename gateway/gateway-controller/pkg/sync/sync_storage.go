@@ -197,7 +197,10 @@ func (s *SyncAwareStorage) SaveCertificate(cert *models.StoredCertificate) error
 		return err
 	}
 
-	eventData, err := json.Marshal(cert)
+	eventData, err := json.Marshal(&CertificateEventData{
+		ID:   cert.ID,
+		Name: cert.Name,
+	})
 	if err != nil {
 		return err
 	}
@@ -234,12 +237,20 @@ func (s *SyncAwareStorage) DeleteCertificate(id string) error {
 		return err
 	}
 
+	eventData, err := json.Marshal(&CertificateEventData{
+		ID:   id,
+		Name: "",
+	})
+	if err != nil {
+		return err
+	}
+
 	event := &Event{
 		OriginatedTimestamp: time.Now(),
 		OrganizationID:      s.organizationID,
 		Action:              ActionDelete,
 		EntityID:            id,
-		EventData:           []byte(`{}`),
+		EventData:           eventData,
 	}
 	if err := s.eventStore.RecordEvent(ctx, EntityTypeCertificate, event); err != nil {
 		return err
@@ -266,7 +277,10 @@ func (s *SyncAwareStorage) SaveLLMProviderTemplate(template *models.StoredLLMPro
 		return err
 	}
 
-	eventData, err := json.Marshal(template)
+	eventData, err := json.Marshal(&LLMTemplateEventData{
+		ID:     template.ID,
+		Handle: template.GetHandle(),
+	})
 	if err != nil {
 		return err
 	}
@@ -303,7 +317,10 @@ func (s *SyncAwareStorage) UpdateLLMProviderTemplate(template *models.StoredLLMP
 		return err
 	}
 
-	eventData, err := json.Marshal(template)
+	eventData, err := json.Marshal(&LLMTemplateEventData{
+		ID:     template.ID,
+		Handle: template.GetHandle(),
+	})
 	if err != nil {
 		return err
 	}
@@ -340,12 +357,20 @@ func (s *SyncAwareStorage) DeleteLLMProviderTemplate(id string) error {
 		return err
 	}
 
+	eventData, err := json.Marshal(&LLMTemplateEventData{
+		ID:     id,
+		Handle: "",
+	})
+	if err != nil {
+		return err
+	}
+
 	event := &Event{
 		OriginatedTimestamp: time.Now(),
 		OrganizationID:      s.organizationID,
 		Action:              ActionDelete,
 		EntityID:            id,
-		EventData:           []byte(`{}`),
+		EventData:           eventData,
 	}
 	if err := s.eventStore.RecordEvent(ctx, EntityTypeLLMTemplate, event); err != nil {
 		return err
