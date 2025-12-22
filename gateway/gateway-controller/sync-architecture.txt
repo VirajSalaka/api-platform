@@ -1,0 +1,629 @@
+# Gateway Controller Multi-Instance Synchronization Architecture
+
+## Overview
+
+The Gateway Controller synchronization system enables multiple controller instances to run behind a load balancer while maintaining consistent state across all instances. It uses an event-based architecture with database-backed state management to achieve eventual consistency.
+
+### Key Characteristics
+
+- **Event-Driven**: Changes are recorded as events and propagated to other instances
+- **Eventually Consistent**: All instances converge to the same state given time
+- **Database-Backed**: Uses shared database (SQLite/PostgreSQL) as source of truth
+- **Poll-Based**: Instances periodically check for state changes (no pub/sub required)
+- **Multi-Entity Support**: Handles APIs, Certificates, and LLM Provider Templates
+- **Multi-Tenancy Ready**: Organization-based isolation built in
+
+## Architecture Components
+
+### 1. Core Abstractions
+
+#### EntityType
+Represents the types of entities that can be synchronized:
+- `API`: API configurations
+- `Certificate`: TLS certificates
+- `LLMProviderTemplate`: LLM provider templates
+
+#### Action
+Represents the type of change:
+- `CREATE`: Entity was created
+- `UPDATE`: Entity was updated
+- `DELETE`: Entity was deleted
+
+#### EntityState
+Tracks version state for each entity type per organization:
+```go
+type EntityState struct {
+    EntityType     EntityType
+    OrganizationID string
+    VersionID      string    // UUID that changes on every modification
+    UpdatedAt      time.Time
+}
+```
+
+#### Event
+Represents a change event:
+```go
+type Event struct {
+    ID                  int64
+    ProcessedTimestamp  time.Time // When recorded in database
+    OriginatedTimestamp time.Time // When change originated
+    OrganizationID      string
+    Action              Action
+    EntityID            string
+    EventData           []byte    // JSON serialized entity data
+}
+```
+
+### 2. Components
+
+#### StateManager (pkg/sync/state_manager.go)
+Manages entity state versioning for detecting changes across instances.
+
+**Responsibilities:**
+- Track version IDs for each entity type
+- Atomically update versions when changes occur
+- Initialize state for new entity types
+
+**Key Methods:**
+- `GetState(ctx, entityType, orgID)`: Retrieve current state
+- `UpdateState(ctx, entityType, orgID)`: Generate new version UUID
+- `GetAllStates(ctx, orgID)`: Get all states for polling
+
+**Implementation Details:**
+- Uses UUID v4 for version IDs
+- Upsert pattern with `ON CONFLICT DO UPDATE`
+- Auto-initializes missing states
+
+#### EventStore (pkg/sync/event_store.go)
+Handles event persistence and retrieval.
+
+**Responsibilities:**
+- Record events within transactions
+- Retrieve events since a timestamp
+- Clean up old events based on retention policy
+
+**Key Methods:**
+- `RecordEvent(ctx, entityType, event)`: Persist event
+- `GetEventsSince(ctx, entityType, orgID, since)`: Fetch events for sync
+- `CleanupOldEvents(ctx, olderThan)`: Remove old events
+
+**Implementation Details:**
+- Separate table per entity type (api_events, certificate_events, llm_template_events)
+- Auto-generated event IDs
+- Ordered by processed_timestamp for reliable replay
+
+#### SyncPoller (pkg/sync/sync_poller.go)
+Background polling mechanism that detects and propagates changes.
+
+**Responsibilities:**
+- Poll entity_states table for version changes
+- Detect version mismatches
+- Fetch and apply events via callbacks
+- Clean up old events periodically
+
+**Key Methods:**
+- `Start(ctx)`: Begin polling loops
+- `Stop()`: Gracefully shutdown
+- `RegisterCallback(entityType, callback)`: Register event handler
+- `GetLastAppliedTimestamp(entityType)`: Get last processed timestamp
+
+**Polling Behavior:**
+- Default interval: 5 seconds
+- Random jitter: 0-1 second (reduces thundering herd)
+- Initial startup jitter to spread instance load
+- Per-entity-type version tracking
+
+**Cleanup Behavior:**
+- Runs every 1 hour
+- Deletes events older than 24 hours (default retention)
+- Prevents unbounded table growth
+
+#### EventProcessor (pkg/sync/event_processor.go)
+Applies sync events to in-memory state.
+
+**Responsibilities:**
+- Deserialize event data
+- Apply changes to ConfigStore
+- Trigger xDS snapshot updates
+- Handle CREATE/UPDATE/DELETE actions
+
+**Key Methods:**
+- `ProcessAPIEvents(entityType, events)`: Handle API events
+- `ProcessCertificateEvents(entityType, events)`: Handle cert events (TODO)
+- `ProcessLLMTemplateEvents(entityType, events)`: Handle LLM events (TODO)
+
+**Processing Logic:**
+- Batch processes all events before triggering xDS update
+- CREATE/UPDATE: Add or update in ConfigStore
+- DELETE: Remove from ConfigStore
+- Single xDS snapshot update after all events applied
+
+#### SyncAwareStorage (pkg/sync/sync_storage.go)
+Wrapper around Storage interface that adds transactional event recording.
+
+**Responsibilities:**
+- Intercept storage operations
+- Record events transactionally
+- Update state versions
+- Delegate actual storage to underlying implementation
+
+**Wrapped Methods:**
+- `SaveConfig()`: Record CREATE event
+- `UpdateConfig()`: Record UPDATE event
+- `DeleteConfig()`: Record DELETE event
+- Similar methods for Certificates and LLM Templates
+
+**Transaction Flow:**
+```
+1. Begin DB transaction
+2. Call underlying storage method (saves to database)
+3. Record event in events table
+4. Update version_id in entity_states table
+5. Commit transaction
+```
+
+## Data Model
+
+### Database Schema
+
+#### entity_states table
+Tracks the current version for each entity type per organization.
+
+```sql
+CREATE TABLE entity_states (
+    entity_type TEXT NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT 'default',
+    version_id TEXT NOT NULL,              -- UUID v4
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (entity_type, organization_id)
+);
+
+CREATE INDEX idx_entity_states_updated ON entity_states(updated_at);
+```
+
+**Purpose:** Provides a fast lookup for version changes without scanning events.
+
+#### api_events table
+Stores events for API entity changes.
+
+```sql
+CREATE TABLE api_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    originated_timestamp TIMESTAMP NOT NULL,
+    organization_id TEXT NOT NULL DEFAULT 'default',
+    action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+    entity_id TEXT NOT NULL,
+    event_data TEXT NOT NULL               -- JSON serialized StoredConfig
+);
+
+CREATE INDEX idx_api_events_lookup ON api_events(organization_id, processed_timestamp);
+```
+
+**Purpose:** Event log for replaying changes to other instances.
+
+#### certificate_events table
+Similar structure to api_events for certificate changes.
+
+#### llm_template_events table
+Similar structure to api_events for LLM template changes.
+
+### Version Flow Example
+
+```
+Initial State:
+  entity_states.version_id = "00000000-0000-0000-0000-000000000000"
+
+Instance A creates API:
+  1. Insert into apis table
+  2. Insert event into api_events (action=CREATE, entity_id=api-123)
+  3. Update entity_states.version_id = "11111111-..."
+  4. Commit transaction
+
+Instance B polling (5 seconds later):
+  1. Query entity_states for entity_type=API
+  2. Compare version_id with known version
+  3. Mismatch detected! ("11111111..." != "00000000...")
+  4. Query api_events WHERE processed_timestamp > last_applied
+  5. Retrieve CREATE event for api-123
+  6. Apply event to ConfigStore (add API)
+  7. Trigger xDS snapshot update
+  8. Update in-memory: knownVersions[API] = "11111111..."
+  9. Update in-memory: lastApplied[API] = event.ProcessedTimestamp
+```
+
+## Synchronization Flow
+
+### Write Path (Instance A modifies an API)
+
+```
+User/API Request → REST API Handler
+                        ↓
+                 SyncAwareStorage.UpdateConfig()
+                        ↓
+            ┌───────────┴───────────┐
+            │   BEGIN TRANSACTION   │
+            └───────────┬───────────┘
+                        ↓
+            ┌───────────┴───────────┐
+            │ Underlying Storage    │
+            │ (save to apis table)  │
+            └───────────┬───────────┘
+                        ↓
+            ┌───────────┴───────────┐
+            │ EventStore.RecordEvent│
+            │ (save to api_events)  │
+            └───────────┬───────────┘
+                        ↓
+            ┌───────────┴───────────┐
+            │ StateManager.UpdateState│
+            │ (new UUID in entity_states)│
+            └───────────┬───────────┘
+                        ↓
+            ┌───────────┴───────────┐
+            │   COMMIT TRANSACTION  │
+            └───────────────────────┘
+```
+
+### Read Path (Instance B detects and applies change)
+
+```
+SyncPoller (every 5s + jitter)
+            ↓
+    Poll entity_states
+            ↓
+    ┌───────┴────────┐
+    │ Version Match? │
+    └───────┬────────┘
+            │
+         NO │ (version mismatch detected)
+            ↓
+    GetEventsSince(lastApplied)
+            ↓
+    ┌───────┴────────┐
+    │ Events Found?  │
+    └───────┬────────┘
+            │
+        YES │
+            ↓
+    ProcessAPIEvents(events)
+            ↓
+    ┌───────┴────────────┐
+    │ For each event:    │
+    │ - Deserialize JSON │
+    │ - ConfigStore.Add/ │
+    │   Update/Delete    │
+    └───────┬────────────┘
+            ↓
+    SnapshotManager.UpdateSnapshot()
+            ↓
+    Update knownVersions & lastApplied
+```
+
+### Cleanup Path
+
+```
+Hourly Timer
+      ↓
+CleanupOldEvents(time.Now() - 24h)
+      ↓
+DELETE FROM api_events WHERE processed_timestamp < cutoff
+DELETE FROM certificate_events WHERE processed_timestamp < cutoff
+DELETE FROM llm_template_events WHERE processed_timestamp < cutoff
+```
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# Enable synchronization (default: false)
+GATEWAY_SYNC_ENABLED=true
+
+# Polling interval (default: 5s)
+GATEWAY_SYNC_POLL_INTERVAL=5s
+
+# Max jitter between polls (default: 1s)
+GATEWAY_SYNC_JITTER_MAX=1s
+
+# Event retention period (default: 24h)
+GATEWAY_SYNC_EVENT_RETENTION=24h
+
+# Organization ID for multi-tenancy (default: "default")
+GATEWAY_SYNC_ORGANIZATION_ID=default
+```
+
+### Configuration Structure
+
+```go
+type SyncConfig struct {
+    Enabled        bool          // Enable multi-instance sync
+    PollInterval   time.Duration // How often to poll for changes
+    JitterMax      time.Duration // Max jitter to add between polls
+    EventRetention time.Duration // How long to keep events
+    OrganizationID string        // Organization ID for multi-tenancy
+}
+```
+
+### Integration in main.go
+
+Location: cmd/controller/main.go:99-176
+
+```go
+// 1. Initialize sync components (if enabled)
+var syncPoller sync.SyncPoller
+if cfg.GatewayController.Sync.Enabled && cfg.IsPersistentMode() {
+    rawDB := sqliteStorage.GetDB()
+    stateManager := sync.NewStateManager(rawDB, log)
+    eventStore := sync.NewSQLiteEventStore(rawDB, log)
+
+    // Wrap storage with sync-aware version
+    db = sync.NewSyncAwareStorage(db, rawDB, stateManager, eventStore,
+                                  cfg.GatewayController.Sync.OrganizationID, log)
+
+    syncPoller = sync.NewSyncPoller(stateManager, eventStore, log, cfg)
+}
+
+// 2. Start poller (after ConfigStore and SnapshotManager are ready)
+if syncPoller != nil {
+    eventProcessor := sync.NewEventProcessor(configStore, snapshotManager, log)
+    syncPoller.RegisterCallback(sync.EntityTypeAPI, eventProcessor.ProcessAPIEvents)
+    syncPoller.RegisterCallback(sync.EntityTypeCertificate, eventProcessor.ProcessCertificateEvents)
+    syncPoller.RegisterCallback(sync.EntityTypeLLMTemplate, eventProcessor.ProcessLLMTemplateEvents)
+    syncPoller.Start(context.Background())
+}
+
+// 3. Graceful shutdown
+if syncPoller != nil {
+    syncPoller.Stop()
+}
+```
+
+## Key Design Decisions
+
+### 1. Poll-Based vs. Push-Based
+
+**Decision:** Poll-based synchronization
+
+**Rationale:**
+- Simpler implementation (no message broker required)
+- Works with standard databases (SQLite, PostgreSQL)
+- Natural rate limiting and backpressure
+- Easier to debug and reason about
+- Sufficient for typical Gateway Controller load patterns
+
+**Trade-offs:**
+- Latency: Changes propagate in ~5 seconds (acceptable for most use cases)
+- Database load: Periodic queries to entity_states (minimal with proper indexing)
+
+### 2. Version-Based Change Detection
+
+**Decision:** UUID version IDs in entity_states table
+
+**Rationale:**
+- Fast version check without scanning events
+- Single query to detect all changed entity types
+- UUIDs prevent version collisions across instances
+- Timestamp-based versioning unreliable with clock skew
+
+**Alternative Considered:** Event sequence numbers
+- Rejected due to complexity with distributed sequence generation
+
+### 3. Separate Event Tables Per Entity Type
+
+**Decision:** api_events, certificate_events, llm_template_events
+
+**Rationale:**
+- Different JSON schemas per entity type
+- Easier to add entity-specific indexes
+- Simpler cleanup with different retention policies
+- Query performance (no entity_type filtering needed)
+
+**Alternative Considered:** Single events table with entity_type column
+- Rejected due to mixed schema complexity
+
+### 4. Transactional Event Recording
+
+**Decision:** Record events within same transaction as data changes
+
+**Rationale:**
+- Guarantees consistency (data change and event are atomic)
+- No orphaned events or missing events
+- Simplifies error handling
+
+**Implementation:**
+- SyncAwareStorage wraps underlying Storage
+- Uses database transactions
+- Order: data change → event → state update → commit
+
+### 5. In-Memory Version Tracking
+
+**Decision:** SyncPoller maintains knownVersions and lastApplied in memory
+
+**Rationale:**
+- Avoids database writes for version tracking
+- Fast version comparison on every poll
+- Stateless poller (restarts from current state on crash)
+
+**Recovery Behavior:**
+- On startup: Loads current versions from entity_states
+- Starts processing from current timestamp (doesn't replay old events)
+- Relies on initial data load from main tables
+
+### 6. Jittered Polling
+
+**Decision:** Random jitter (0-1s) added between polls
+
+**Rationale:**
+- Prevents thundering herd when multiple instances start simultaneously
+- Spreads database load over time
+- Initial jitter on startup further distributes load
+
+### 7. Event Retention and Cleanup
+
+**Decision:** 24-hour retention, hourly cleanup
+
+**Rationale:**
+- Events only needed until all instances have processed them
+- 24 hours provides safety margin for instance downtime
+- Hourly cleanup is infrequent enough to minimize overhead
+- Prevents unbounded table growth
+
+### 8. Single xDS Update Per Event Batch
+
+**Decision:** Process all events, then trigger single xDS snapshot update
+
+**Rationale:**
+- Reduces xDS churn
+- More efficient than per-event updates
+- Eventual consistency model tolerates batching
+- Envoy clients get consistent snapshot
+
+## Operational Characteristics
+
+### Consistency Model
+
+**Eventual Consistency:**
+- All instances eventually converge to same state
+- Convergence time: ~5-6 seconds (poll interval + jitter)
+- No strong consistency guarantees
+- Suitable for Gateway configuration (not critical real-time data)
+
+### Failure Modes
+
+**Instance Crash:**
+- Persistent state in database preserved
+- On restart: Loads data from main tables
+- Resumes polling with current version
+- May miss intermediate states but final state is correct
+
+**Database Unavailable:**
+- Instances continue serving with in-memory state
+- Sync operations fail gracefully (logged as errors)
+- Resume when database available
+
+**Network Partition:**
+- Instances isolated from database continue serving stale state
+- No split-brain (database is source of truth)
+- Recover when partition healed
+
+**Clock Skew:**
+- Minimal impact (uses version UUIDs, not timestamps for versioning)
+- originated_timestamp and processed_timestamp may be slightly off
+- Event ordering by processed_timestamp is reliable (set by database)
+
+### Performance Characteristics
+
+**Write Path:**
+- Overhead: ~2 additional database writes per operation (event + state)
+- Transaction ensures atomicity
+- Impact: Minimal (transactions are fast with proper indexing)
+
+**Read Path (Polling):**
+- Frequency: Every 5 seconds per instance
+- Query cost: Single SELECT on entity_states (indexed)
+- Event fetch only on version mismatch
+- Scalability: Linear with number of instances
+
+**Storage Growth:**
+- Events grow with change rate
+- Cleanup limits to 24 hours of events
+- Typical: Few MB for active deployments
+- Monitor: api_events table size
+
+## Usage Examples
+
+### Example 1: Deploy Two-Instance Setup
+
+```bash
+# Instance 1
+GATEWAY_SYNC_ENABLED=true \
+GATEWAY_SYNC_ORGANIZATION_ID=org-123 \
+GATEWAY_STORAGE_TYPE=sqlite \
+GATEWAY_STORAGE_SQLITE_PATH=/shared/gateway.db \
+./gateway-controller
+
+# Instance 2 (shares same database)
+GATEWAY_SYNC_ENABLED=true \
+GATEWAY_SYNC_ORGANIZATION_ID=org-123 \
+GATEWAY_STORAGE_TYPE=sqlite \
+GATEWAY_STORAGE_SQLITE_PATH=/shared/gateway.db \
+./gateway-controller
+```
+
+### Example 2: Create API on Instance 1
+
+```bash
+# Request hits Instance 1
+curl -X POST http://instance1:8080/apis \
+  -d '{"id": "api-123", "name": "My API", ...}'
+
+# Instance 1:
+# - Saves API to database
+# - Records CREATE event
+# - Updates version_id
+
+# Instance 2 (5 seconds later):
+# - Polls entity_states
+# - Detects version change
+# - Fetches CREATE event
+# - Adds API to ConfigStore
+# - Updates xDS snapshot
+# - Envoy instances get new config
+```
+
+### Example 3: Update API on Instance 2
+
+```bash
+# Request hits Instance 2 (load balanced)
+curl -X PUT http://instance2:8080/apis/api-123 \
+  -d '{"id": "api-123", "name": "Updated API", ...}'
+
+# Instance 2:
+# - Updates API in database
+# - Records UPDATE event
+# - Updates version_id
+
+# Instance 1 (5 seconds later):
+# - Detects version change
+# - Fetches UPDATE event
+# - Updates ConfigStore
+# - Updates xDS snapshot
+```
+
+### Example 4: Instance Crash and Recovery
+
+```bash
+# Instance 1 crashes at 10:00 AM
+# Instance 2 continues serving
+
+# Meanwhile, 3 APIs are created/updated via Instance 2
+
+# Instance 1 restarts at 10:05 AM
+# - Loads all APIs from database (latest state)
+# - Initializes knownVersions from entity_states
+# - Starts polling from current timestamp
+# - In-memory state matches database immediately
+```
+
+## Summary
+
+The Gateway Controller synchronization system provides a robust, simple, and scalable solution for multi-instance deployments. By leveraging database-backed event sourcing and poll-based change detection, it achieves eventual consistency without complex infrastructure dependencies.
+
+**Key Benefits:**
+- Simple deployment (no additional infrastructure)
+- Reliable state synchronization
+- Crash resilient
+- Multi-tenancy ready
+- Horizontally scalable
+
+**Best For:**
+- Multi-instance Gateway deployments behind load balancers
+- Environments where ~5s eventual consistency is acceptable
+- SQLite or PostgreSQL backed deployments
+- Teams preferring simple, debuggable architectures
+
+**Not Suitable For:**
+- Real-time synchronization requirements (<1s latency)
+- Scenarios requiring strong consistency
+- Memory-only deployments (requires persistent database)
