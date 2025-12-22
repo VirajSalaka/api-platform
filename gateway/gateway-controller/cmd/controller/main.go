@@ -163,17 +163,8 @@ func main() {
 		}
 	}
 
-	// Start sync poller if enabled
-	if syncPoller != nil {
-		eventProcessor = sync.NewEventProcessor(configStore, db, snapshotManager, log)
-		syncPoller.RegisterCallback(sync.EntityTypeAPI, eventProcessor.ProcessAPIEvents)
-		syncPoller.RegisterCallback(sync.EntityTypeCertificate, eventProcessor.ProcessCertificateEvents)
-		syncPoller.RegisterCallback(sync.EntityTypeLLMTemplate, eventProcessor.ProcessLLMTemplateEvents)
-
-		if err := syncPoller.Start(context.Background()); err != nil {
-			log.Fatal("Failed to start sync poller", zap.Error(err))
-		}
-	}
+	// Note: syncPoller will be started after policyManager is initialized
+	// to allow EventProcessor to update policies on sync events
 
 	// Generate initial xDS snapshot
 	log.Info("Generating initial xDS snapshot")
@@ -254,6 +245,18 @@ func main() {
 		}()
 	} else {
 		log.Info("Policy xDS server is disabled")
+	}
+
+	// Start sync poller if enabled (after policyManager is initialized)
+	if syncPoller != nil {
+		eventProcessor = sync.NewEventProcessor(configStore, db, snapshotManager, policyManager, &cfg.GatewayController.Router, log)
+		syncPoller.RegisterCallback(sync.EntityTypeAPI, eventProcessor.ProcessAPIEvents)
+		syncPoller.RegisterCallback(sync.EntityTypeCertificate, eventProcessor.ProcessCertificateEvents)
+		syncPoller.RegisterCallback(sync.EntityTypeLLMTemplate, eventProcessor.ProcessLLMTemplateEvents)
+
+		if err := syncPoller.Start(context.Background()); err != nil {
+			log.Fatal("Failed to start sync poller", zap.Error(err))
+		}
 	}
 
 	// Load policy definitions from files (must be done before creating validator)
