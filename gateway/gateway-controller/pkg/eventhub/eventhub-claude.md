@@ -1,6 +1,6 @@
 # EventHub Implementation Plan
 
-This document provides a step-by-step implementation guide for the EventHub package. The EventHub acts as a simple message broker based on database persistence with in-memory queue delivery.
+This document provides a step-by-step implementation guide for the EventHub package. The EventHub acts as a simple message broker based on database persistence with polling-based delivery.
 
 ## Architecture Overview
 
@@ -10,27 +10,26 @@ This document provides a step-by-step implementation guide for the EventHub pack
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
-│  │   Topics     │    │   States     │    │   Subscriptions      │  │
-│  │   Registry   │───▶│   Table      │    │   (Channels)         │  │
+│  │   Topics     │    │   States     │◄───│   Poller             │  │
+│  │   Registry   │───▶│   Table      │    │   (polls for changes)│  │
 │  │              │    │              │    │                      │  │
+│  └──────────────┘    └──────────────┘    └──────────┬───────────┘  │
+│         │                                           │               │
+│         │                                           │ on change     │
+│         ▼                                           ▼               │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │   Publish    │───▶│   Events     │───▶│   Subscriptions      │  │
+│  │   (DB write) │    │   Table      │    │   (Channels)         │  │
 │  └──────────────┘    └──────────────┘    └──────────────────────┘  │
-│         │                                         ▲                 │
-│         │                                         │                 │
-│         ▼                                         │                 │
-│  ┌──────────────┐    ┌──────────────┐            │                 │
-│  │   Internal   │    │   Events     │────────────┘                 │
-│  │   Queue      │───▶│   Table      │   (background dispatcher)    │
-│  │              │    │              │                               │
-│  └──────────────┘    └──────────────┘                               │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key Design Decisions:**
-1. **atomic operations**: States and Events tables are updated atomic (unlike sync package)
-2. **Push-based delivery**: Uses channels to push events to subscribers (unlike sync's polling)
-3. **Internal queuing**: Events are buffered in-memory before DB persistence
-4. **Batch delivery**: Subscribers receive events as arrays for efficient processing
+1. **Atomic operations**: States and Events tables are updated atomically
+2. **Poll-based delivery**: Background poller detects state changes, fetches events from DB, delivers to subscribers
+3. **No in-memory queue**: Events go directly to DB; poller fetches and delivers
+4. **Natural batching**: Events fetched during each poll cycle form the batch (no separate batching mechanism)
 
 ---
 
@@ -45,10 +44,7 @@ package eventhub
 
 import (
 	"context"
-	"database/sql"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 // TopicName represents a unique topic identifier
@@ -72,19 +68,20 @@ type TopicState struct {
 
 // EventHub is the main interface for the message broker
 type EventHub interface {
-	// Initialize sets up database connections and starts background workers
+	// Initialize sets up database connections and starts background poller
 	Initialize(ctx context.Context) error
 
-	// RegisterTopic registers a topic with specified queue size
+	// RegisterTopic registers a topic
 	// Returns error if the events table for this topic does not exist
-	RegisterTopic(topicName TopicName, queueSize int) error
+	// Creates entry in States table with empty version
+	RegisterTopic(topicName TopicName) error
 
 	// PublishEvent publishes an event to a topic
-	// Updates the states table and events table (non-atomically)
+	// Updates the states table and events table atomically
 	PublishEvent(ctx context.Context, topicName TopicName, eventData []byte) error
 
 	// RegisterSubscription registers a channel to receive events for a topic
-	// Events are delivered as batches (arrays)
+	// Events are delivered as batches (arrays) based on poll cycle
 	RegisterSubscription(topicName TopicName, eventChan chan<- []Event) error
 
 	// CleanUpEvents removes events between the specified time range
@@ -96,10 +93,8 @@ type EventHub interface {
 
 // Config holds EventHub configuration
 type Config struct {
-	// BatchSize is the number of events to batch before sending to subscribers
-	BatchSize int
-	// FlushInterval is how often to flush partial batches
-	FlushInterval time.Duration
+	// PollInterval is how often to poll for state changes
+	PollInterval time.Duration
 	// CleanupInterval is how often to run automatic cleanup
 	CleanupInterval time.Duration
 	// RetentionPeriod is how long to keep events (default 1 hour)
@@ -109,8 +104,7 @@ type Config struct {
 // DefaultConfig returns sensible defaults
 func DefaultConfig() Config {
 	return Config{
-		BatchSize:       100,
-		FlushInterval:   time.Second * 5,
+		PollInterval:    time.Second * 5,
 		CleanupInterval: time.Minute * 10,
 		RetentionPeriod: time.Hour,
 	}
@@ -120,8 +114,8 @@ func DefaultConfig() Config {
 **Checklist:**
 - [ ] Create `types.go` with Event, TopicState, TopicName types
 - [ ] Define EventHub interface with all methods
-- [ ] Define Config struct with defaults
-- [ ] Add imports for context, database/sql, time, zap
+- [ ] Define Config struct with PollInterval, CleanupInterval, RetentionPeriod
+- [ ] Add imports for context, time
 
 ---
 
@@ -129,7 +123,7 @@ func DefaultConfig() Config {
 
 **File**: `pkg/eventhub/topic.go`
 
-Create the internal topic registry that manages topics and their queues.
+Create the internal topic registry that manages topics and their subscriptions.
 
 ```go
 package eventhub
@@ -137,22 +131,24 @@ package eventhub
 import (
 	"errors"
 	"sync"
+	"time"
 )
 
 var (
 	ErrTopicNotFound      = errors.New("topic not found")
 	ErrTopicAlreadyExists = errors.New("topic already registered")
 	ErrTopicTableMissing  = errors.New("events table for topic does not exist")
-	ErrInvalidQueueSize   = errors.New("queue size must be positive")
 )
 
-// topic represents an internal topic with its queue and subscriptions
+// topic represents an internal topic with its subscriptions and poll state
 type topic struct {
 	name         TopicName
-	queue        chan Event       // Internal buffer queue
-	queueSize    int
 	subscribers  []chan<- []Event // Registered subscription channels
 	subscriberMu sync.RWMutex
+
+	// Polling state
+	knownVersion string    // Last known version from states table
+	lastPolled   time.Time // Timestamp of last successful poll
 }
 
 // topicRegistry manages all registered topics
@@ -169,13 +165,9 @@ func newTopicRegistry() *topicRegistry {
 }
 
 // register adds a new topic to the registry
-func (r *topicRegistry) register(name TopicName, queueSize int) error {
+func (r *topicRegistry) register(name TopicName) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	if queueSize <= 0 {
-		return ErrInvalidQueueSize
-	}
 
 	if _, exists := r.topics[name]; exists {
 		return ErrTopicAlreadyExists
@@ -183,9 +175,8 @@ func (r *topicRegistry) register(name TopicName, queueSize int) error {
 
 	r.topics[name] = &topic{
 		name:        name,
-		queue:       make(chan Event, queueSize),
-		queueSize:   queueSize,
 		subscribers: make([]chan<- []Event, 0),
+		lastPolled:  time.Now(), // Start from now, don't replay old events
 	}
 
 	return nil
@@ -219,25 +210,6 @@ func (r *topicRegistry) addSubscriber(name TopicName, ch chan<- []Event) error {
 	return nil
 }
 
-// enqueue adds an event to a topic's internal queue
-func (r *topicRegistry) enqueue(name TopicName, event Event) error {
-	t, err := r.get(name)
-	if err != nil {
-		return err
-	}
-
-	select {
-	case t.queue <- event:
-		return nil
-	default:
-		// Queue is full - this is a design decision
-		// Option 1: Drop event (current)
-		// Option 2: Block
-		// Option 3: Return error
-		return errors.New("queue is full, event dropped")
-	}
-}
-
 // getAll returns all registered topics
 func (r *topicRegistry) getAll() []*topic {
 	r.mu.RLock()
@@ -249,11 +221,28 @@ func (r *topicRegistry) getAll() []*topic {
 	}
 	return topics
 }
+
+// updatePollState updates the polling state for a topic
+func (t *topic) updatePollState(version string, polledAt time.Time) {
+	t.knownVersion = version
+	t.lastPolled = polledAt
+}
+
+// getSubscribers returns a copy of the subscribers list
+func (t *topic) getSubscribers() []chan<- []Event {
+	t.subscriberMu.RLock()
+	defer t.subscriberMu.RUnlock()
+
+	subs := make([]chan<- []Event, len(t.subscribers))
+	copy(subs, t.subscribers)
+	return subs
+}
 ```
 
 **Checklist:**
 - [ ] Create `topic.go` with topic and topicRegistry types
-- [ ] Implement register, get, addSubscriber, enqueue methods
+- [ ] Implement register, get, addSubscriber, getAll methods
+- [ ] Add knownVersion and lastPolled fields for polling state
 - [ ] Add proper error definitions
 - [ ] Use sync.RWMutex for thread safety
 
@@ -311,7 +300,6 @@ func (s *store) tableExists(ctx context.Context, topicName TopicName) (bool, err
 
 // getEventsTableName returns the events table name for a topic
 func (s *store) getEventsTableName(topicName TopicName) string {
-	// Sanitize topic name for SQL table name
 	return fmt.Sprintf("%s_events", string(topicName))
 }
 
@@ -331,60 +319,87 @@ func (s *store) initializeTopicState(ctx context.Context, topicName TopicName) e
 	return nil
 }
 
-// updateState updates the version for a topic (non-atomic, separate from event recording)
-func (s *store) updateState(ctx context.Context, topicName TopicName) (string, error) {
+// getState retrieves the current state for a topic
+func (s *store) getState(ctx context.Context, topicName TopicName) (*TopicState, error) {
+	query := `
+		SELECT topic_name, version_id, updated_at
+		FROM topic_states
+		WHERE topic_name = ?
+	`
+
+	var state TopicState
+	var name string
+	err := s.db.QueryRowContext(ctx, query, string(topicName)).Scan(
+		&name, &state.VersionID, &state.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get state: %w", err)
+	}
+
+	state.TopicName = TopicName(name)
+	return &state, nil
+}
+
+// publishEventAtomic records an event and updates state in a single transaction
+func (s *store) publishEventAtomic(ctx context.Context, topicName TopicName, event *Event) (int64, string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, "", fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Step 1: Insert event
+	tableName := s.getEventsTableName(topicName)
+	insertQuery := fmt.Sprintf(`
+		INSERT INTO %s (processed_timestamp, originated_timestamp, event_data)
+		VALUES (?, ?, ?)
+	`, tableName)
+
+	result, err := tx.ExecContext(ctx, insertQuery,
+		event.ProcessedTimestamp,
+		event.OriginatedTimestamp,
+		event.EventData,
+	)
+	if err != nil {
+		return 0, "", fmt.Errorf("failed to record event: %w", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, "", fmt.Errorf("failed to get event ID: %w", err)
+	}
+
+	// Step 2: Update state version
 	newVersion := uuid.New().String()
 	now := time.Now()
 
-	query := `
+	updateQuery := `
 		INSERT INTO topic_states (topic_name, version_id, updated_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT(topic_name)
 		DO UPDATE SET version_id = excluded.version_id, updated_at = excluded.updated_at
 	`
 
-	_, err := s.db.ExecContext(ctx, query, string(topicName), newVersion, now)
+	_, err = tx.ExecContext(ctx, updateQuery, string(topicName), newVersion, now)
 	if err != nil {
-		return "", fmt.Errorf("failed to update state: %w", err)
+		return 0, "", fmt.Errorf("failed to update state: %w", err)
 	}
 
-	s.logger.Debug("Updated topic state",
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return 0, "", fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	s.logger.Debug("Published event atomically",
 		zap.String("topic", string(topicName)),
+		zap.Int64("id", id),
 		zap.String("version", newVersion),
 	)
 
-	return newVersion, nil
-}
-
-// recordEvent inserts an event into the events table (non-atomic, separate from state update)
-func (s *store) recordEvent(ctx context.Context, topicName TopicName, event *Event) (int64, error) {
-	tableName := s.getEventsTableName(topicName)
-
-	query := fmt.Sprintf(`
-		INSERT INTO %s (processed_timestamp, originated_timestamp, event_data)
-		VALUES (?, ?, ?)
-	`, tableName)
-
-	result, err := s.db.ExecContext(ctx, query,
-		event.ProcessedTimestamp,
-		event.OriginatedTimestamp,
-		event.EventData,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to record event: %w", err)
-	}
-
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get event ID: %w", err)
-	}
-
-	s.logger.Debug("Recorded event",
-		zap.String("topic", string(topicName)),
-		zap.Int64("id", id),
-	)
-
-	return id, nil
+	return id, newVersion, nil
 }
 
 // getEventsSince retrieves events after a given timestamp
@@ -452,7 +467,6 @@ func (s *store) cleanupEvents(ctx context.Context, topicName TopicName, timeFrom
 
 // cleanupAllTopics removes old events from all known topics
 func (s *store) cleanupAllTopics(ctx context.Context, olderThan time.Time) error {
-	// Get all topic names from states table
 	rows, err := s.db.QueryContext(ctx, `SELECT topic_name FROM topic_states`)
 	if err != nil {
 		return fmt.Errorf("failed to query topics: %w", err)
@@ -468,7 +482,6 @@ func (s *store) cleanupAllTopics(ctx context.Context, olderThan time.Time) error
 		topics = append(topics, TopicName(name))
 	}
 
-	// Cleanup each topic
 	for _, topic := range topics {
 		_, err := s.cleanupEvents(ctx, topic, time.Time{}, olderThan)
 		if err != nil {
@@ -476,7 +489,6 @@ func (s *store) cleanupAllTopics(ctx context.Context, olderThan time.Time) error
 				zap.String("topic", string(topic)),
 				zap.Error(err),
 			)
-			// Continue with other topics
 		}
 	}
 
@@ -488,19 +500,19 @@ func (s *store) cleanupAllTopics(ctx context.Context, olderThan time.Time) error
 - [ ] Create `store.go` with store struct
 - [ ] Implement tableExists to validate topic tables
 - [ ] Implement initializeTopicState for empty state creation
-- [ ] Implement updateState (separate, non-atomic)
-- [ ] Implement recordEvent (separate, non-atomic)
+- [ ] Implement getState to read current version
+- [ ] Implement publishEventAtomic with transaction (event + state update)
 - [ ] Implement getEventsSince for querying events
 - [ ] Implement cleanupEvents and cleanupAllTopics
 - [ ] Use proper SQL parameterization to prevent injection
 
 ---
 
-## Step 4: Implement Event Dispatcher
+## Step 4: Implement Poller
 
-**File**: `pkg/eventhub/dispatcher.go`
+**File**: `pkg/eventhub/poller.go`
 
-Create the background dispatcher that delivers events to subscribers.
+Create the background poller that detects state changes and delivers events. Reference: `pkg/sync/sync_poller.go`
 
 ```go
 package eventhub
@@ -513,133 +525,158 @@ import (
 	"go.uber.org/zap"
 )
 
-// dispatcher handles background event delivery to subscribers
-type dispatcher struct {
-	registry      *topicRegistry
-	config        Config
-	logger        *zap.Logger
+// poller handles background polling for state changes and event delivery
+type poller struct {
+	store    *store
+	registry *topicRegistry
+	config   Config
+	logger   *zap.Logger
 
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wg            sync.WaitGroup
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
-// newDispatcher creates a new event dispatcher
-func newDispatcher(registry *topicRegistry, config Config, logger *zap.Logger) *dispatcher {
-	return &dispatcher{
+// newPoller creates a new event poller
+func newPoller(store *store, registry *topicRegistry, config Config, logger *zap.Logger) *poller {
+	return &poller{
+		store:    store,
 		registry: registry,
 		config:   config,
 		logger:   logger,
 	}
 }
 
-// start begins the dispatcher background workers
-func (d *dispatcher) start(ctx context.Context) {
-	d.ctx, d.cancel = context.WithCancel(ctx)
+// start begins the poller background worker
+func (p *poller) start(ctx context.Context) {
+	p.ctx, p.cancel = context.WithCancel(ctx)
 
-	// Start a dispatcher goroutine for each topic
-	for _, t := range d.registry.getAll() {
-		d.wg.Add(1)
-		go d.dispatchLoop(t)
-	}
+	p.wg.Add(1)
+	go p.pollLoop()
 
-	d.logger.Info("Dispatcher started")
+	p.logger.Info("Poller started", zap.Duration("interval", p.config.PollInterval))
 }
 
-// startForTopic starts dispatcher for a newly registered topic
-func (d *dispatcher) startForTopic(t *topic) {
-	if d.ctx == nil {
-		return // Dispatcher not started yet
-	}
+// pollLoop runs the main polling loop
+func (p *poller) pollLoop() {
+	defer p.wg.Done()
 
-	d.wg.Add(1)
-	go d.dispatchLoop(t)
-}
-
-// dispatchLoop processes events from a topic's queue and delivers to subscribers
-func (d *dispatcher) dispatchLoop(t *topic) {
-	defer d.wg.Done()
-
-	batch := make([]Event, 0, d.config.BatchSize)
-	flushTicker := time.NewTicker(d.config.FlushInterval)
-	defer flushTicker.Stop()
+	ticker := time.NewTicker(p.config.PollInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-d.ctx.Done():
-			// Flush remaining events before exit
-			if len(batch) > 0 {
-				d.deliverBatch(t, batch)
-			}
+		case <-p.ctx.Done():
 			return
-
-		case event := <-t.queue:
-			batch = append(batch, event)
-			if len(batch) >= d.config.BatchSize {
-				d.deliverBatch(t, batch)
-				batch = make([]Event, 0, d.config.BatchSize)
-			}
-
-		case <-flushTicker.C:
-			if len(batch) > 0 {
-				d.deliverBatch(t, batch)
-				batch = make([]Event, 0, d.config.BatchSize)
-			}
+		case <-ticker.C:
+			p.pollAllTopics()
 		}
 	}
 }
 
-// deliverBatch sends a batch of events to all subscribers
-func (d *dispatcher) deliverBatch(t *topic, batch []Event) {
-	t.subscriberMu.RLock()
-	subscribers := make([]chan<- []Event, len(t.subscribers))
-	copy(subscribers, t.subscribers)
-	t.subscriberMu.RUnlock()
+// pollAllTopics checks all registered topics for state changes
+func (p *poller) pollAllTopics() {
+	topics := p.registry.getAll()
+
+	for _, t := range topics {
+		if err := p.pollTopic(t); err != nil {
+			p.logger.Error("Failed to poll topic",
+				zap.String("topic", string(t.name)),
+				zap.Error(err),
+			)
+		}
+	}
+}
+
+// pollTopic checks a single topic for state changes and delivers events
+func (p *poller) pollTopic(t *topic) error {
+	ctx := p.ctx
+
+	// Get current state from database
+	state, err := p.store.getState(ctx, t.name)
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		// Topic state not initialized yet
+		return nil
+	}
+
+	// Check if version has changed
+	if state.VersionID == t.knownVersion {
+		// No changes
+		return nil
+	}
+
+	p.logger.Debug("State change detected",
+		zap.String("topic", string(t.name)),
+		zap.String("oldVersion", t.knownVersion),
+		zap.String("newVersion", state.VersionID),
+	)
+
+	// Fetch events since last poll
+	events, err := p.store.getEventsSince(ctx, t.name, t.lastPolled)
+	if err != nil {
+		return err
+	}
+
+	if len(events) > 0 {
+		// Deliver events to subscribers
+		p.deliverEvents(t, events)
+	}
+
+	// Update poll state
+	t.updatePollState(state.VersionID, time.Now())
+
+	return nil
+}
+
+// deliverEvents sends events to all subscribers of a topic
+func (p *poller) deliverEvents(t *topic, events []Event) {
+	subscribers := t.getSubscribers()
 
 	if len(subscribers) == 0 {
-		d.logger.Debug("No subscribers for topic",
+		p.logger.Debug("No subscribers for topic",
 			zap.String("topic", string(t.name)),
-			zap.Int("events", len(batch)),
+			zap.Int("events", len(events)),
 		)
 		return
 	}
 
-	// Make a copy of the batch for each subscriber
-	batchCopy := make([]Event, len(batch))
-	copy(batchCopy, batch)
-
+	// Deliver to all subscribers
 	for _, ch := range subscribers {
 		select {
-		case ch <- batchCopy:
-			d.logger.Debug("Delivered batch to subscriber",
+		case ch <- events:
+			p.logger.Debug("Delivered events to subscriber",
 				zap.String("topic", string(t.name)),
-				zap.Int("events", len(batchCopy)),
+				zap.Int("events", len(events)),
 			)
 		default:
-			d.logger.Warn("Subscriber channel full, dropping batch",
+			p.logger.Warn("Subscriber channel full, dropping events",
 				zap.String("topic", string(t.name)),
-				zap.Int("events", len(batchCopy)),
+				zap.Int("events", len(events)),
 			)
 		}
 	}
 }
 
-// stop gracefully stops the dispatcher
-func (d *dispatcher) stop() {
-	if d.cancel != nil {
-		d.cancel()
+// stop gracefully stops the poller
+func (p *poller) stop() {
+	if p.cancel != nil {
+		p.cancel()
 	}
-	d.wg.Wait()
-	d.logger.Info("Dispatcher stopped")
+	p.wg.Wait()
+	p.logger.Info("Poller stopped")
 }
 ```
 
 **Checklist:**
-- [ ] Create `dispatcher.go` with dispatcher struct
+- [ ] Create `poller.go` with poller struct
 - [ ] Implement start/stop lifecycle methods
-- [ ] Implement dispatchLoop with batching logic
-- [ ] Implement deliverBatch to send to all subscribers
-- [ ] Handle graceful shutdown with remaining event flush
+- [ ] Implement pollLoop that runs on PollInterval
+- [ ] Implement pollAllTopics to check each registered topic
+- [ ] Implement pollTopic with version comparison logic
+- [ ] Implement deliverEvents to send to all subscribers
 - [ ] Use non-blocking sends to prevent subscriber blocking
 
 ---
@@ -665,12 +702,12 @@ import (
 
 // eventHub is the main implementation of EventHub interface
 type eventHub struct {
-	db         *sql.DB
-	store      *store
-	registry   *topicRegistry
-	dispatcher *dispatcher
-	config     Config
-	logger     *zap.Logger
+	db       *sql.DB
+	store    *store
+	registry *topicRegistry
+	poller   *poller
+	config   Config
+	logger   *zap.Logger
 
 	cleanupCtx    context.Context
 	cleanupCancel context.CancelFunc
@@ -682,10 +719,11 @@ type eventHub struct {
 // New creates a new EventHub instance
 func New(db *sql.DB, logger *zap.Logger, config Config) EventHub {
 	registry := newTopicRegistry()
+	store := newStore(db, logger)
 
 	return &eventHub{
 		db:       db,
-		store:    newStore(db, logger),
+		store:    store,
 		registry: registry,
 		config:   config,
 		logger:   logger,
@@ -703,9 +741,9 @@ func (eh *eventHub) Initialize(ctx context.Context) error {
 
 	eh.logger.Info("Initializing EventHub")
 
-	// Create dispatcher
-	eh.dispatcher = newDispatcher(eh.registry, eh.config, eh.logger)
-	eh.dispatcher.start(ctx)
+	// Create and start poller
+	eh.poller = newPoller(eh.store, eh.registry, eh.config, eh.logger)
+	eh.poller.start(ctx)
 
 	// Start cleanup goroutine
 	eh.cleanupCtx, eh.cleanupCancel = context.WithCancel(ctx)
@@ -713,16 +751,14 @@ func (eh *eventHub) Initialize(ctx context.Context) error {
 	go eh.cleanupLoop()
 
 	eh.initialized = true
-	eh.logger.Info("EventHub initialized successfully")
+	eh.logger.Info("EventHub initialized successfully",
+		zap.Duration("pollInterval", eh.config.PollInterval),
+	)
 	return nil
 }
 
 // RegisterTopic registers a new topic with the EventHub
-func (eh *eventHub) RegisterTopic(topicName TopicName, queueSize int) error {
-	eh.mu.RLock()
-	initialized := eh.initialized
-	eh.mu.RUnlock()
-
+func (eh *eventHub) RegisterTopic(topicName TopicName) error {
 	ctx := context.Background()
 
 	// Check if events table exists
@@ -736,7 +772,7 @@ func (eh *eventHub) RegisterTopic(topicName TopicName, queueSize int) error {
 	}
 
 	// Register topic in registry
-	if err := eh.registry.register(topicName, queueSize); err != nil {
+	if err := eh.registry.register(topicName); err != nil {
 		return err
 	}
 
@@ -745,22 +781,15 @@ func (eh *eventHub) RegisterTopic(topicName TopicName, queueSize int) error {
 		return fmt.Errorf("failed to initialize state: %w", err)
 	}
 
-	// Start dispatcher for this topic if already initialized
-	if initialized {
-		t, _ := eh.registry.get(topicName)
-		eh.dispatcher.startForTopic(t)
-	}
-
 	eh.logger.Info("Topic registered",
 		zap.String("topic", string(topicName)),
-		zap.Int("queueSize", queueSize),
 	)
 
 	return nil
 }
 
 // PublishEvent publishes an event to a topic
-// Note: States and Events are updated NON-ATOMICALLY (separate operations)
+// Note: States and Events are updated ATOMICALLY in a transaction
 func (eh *eventHub) PublishEvent(ctx context.Context, topicName TopicName, eventData []byte) error {
 	// Verify topic is registered
 	_, err := eh.registry.get(topicName)
@@ -776,37 +805,16 @@ func (eh *eventHub) PublishEvent(ctx context.Context, topicName TopicName, event
 		EventData:           eventData,
 	}
 
-	// Step 1: Record event in database (NON-ATOMIC)
-	id, err := eh.store.recordEvent(ctx, topicName, event)
+	// Publish atomically (event + state update in transaction)
+	id, version, err := eh.store.publishEventAtomic(ctx, topicName, event)
 	if err != nil {
-		return fmt.Errorf("failed to record event: %w", err)
-	}
-	event.ID = id
-
-	// Step 2: Update state version (NON-ATOMIC, separate operation)
-	_, err = eh.store.updateState(ctx, topicName)
-	if err != nil {
-		// Log warning but don't fail - event is already recorded
-		eh.logger.Warn("Failed to update state after recording event",
-			zap.String("topic", string(topicName)),
-			zap.Int64("eventId", id),
-			zap.Error(err),
-		)
-	}
-
-	// Step 3: Enqueue for delivery to subscribers
-	if err := eh.registry.enqueue(topicName, *event); err != nil {
-		eh.logger.Warn("Failed to enqueue event for delivery",
-			zap.String("topic", string(topicName)),
-			zap.Int64("eventId", id),
-			zap.Error(err),
-		)
-		// Don't fail - event is persisted, just not delivered via channel
+		return fmt.Errorf("failed to publish event: %w", err)
 	}
 
 	eh.logger.Debug("Event published",
 		zap.String("topic", string(topicName)),
 		zap.Int64("id", id),
+		zap.String("version", version),
 	)
 
 	return nil
@@ -834,7 +842,6 @@ func (eh *eventHub) CleanUpEvents(ctx context.Context, timeFrom, timeEnd time.Ti
 				zap.String("topic", string(t.name)),
 				zap.Error(err),
 			)
-			// Continue with other topics
 		}
 	}
 	return nil
@@ -876,9 +883,9 @@ func (eh *eventHub) Close() error {
 		eh.cleanupCancel()
 	}
 
-	// Stop dispatcher
-	if eh.dispatcher != nil {
-		eh.dispatcher.stop()
+	// Stop poller
+	if eh.poller != nil {
+		eh.poller.stop()
 	}
 
 	// Wait for goroutines
@@ -893,9 +900,9 @@ func (eh *eventHub) Close() error {
 **Checklist:**
 - [ ] Create `eventhub.go` with eventHub struct implementing EventHub interface
 - [ ] Implement New() constructor
-- [ ] Implement Initialize() to set up connections and start workers
+- [ ] Implement Initialize() to set up connections and start poller
 - [ ] Implement RegisterTopic() with table existence check and state initialization
-- [ ] Implement PublishEvent() with NON-ATOMIC state and event updates
+- [ ] Implement PublishEvent() with ATOMIC state and event updates
 - [ ] Implement RegisterSubscription() for channel registration
 - [ ] Implement CleanUpEvents() for manual cleanup
 - [ ] Implement cleanupLoop() for automatic periodic cleanup
@@ -1002,15 +1009,15 @@ func TestEventHub_RegisterTopic(t *testing.T) {
 	defer hub.Close()
 
 	// Test successful registration
-	err = hub.RegisterTopic("test", 100)
+	err = hub.RegisterTopic("test")
 	assert.NoError(t, err)
 
 	// Test duplicate registration
-	err = hub.RegisterTopic("test", 100)
+	err = hub.RegisterTopic("test")
 	assert.ErrorIs(t, err, ErrTopicAlreadyExists)
 
 	// Test missing table
-	err = hub.RegisterTopic("nonexistent", 100)
+	err = hub.RegisterTopic("nonexistent")
 	assert.ErrorIs(t, err, ErrTopicTableMissing)
 }
 
@@ -1020,14 +1027,14 @@ func TestEventHub_PublishAndSubscribe(t *testing.T) {
 
 	logger := zap.NewNop()
 	config := DefaultConfig()
-	config.FlushInterval = 100 * time.Millisecond
+	config.PollInterval = 100 * time.Millisecond // Fast polling for test
 	hub := New(db, logger, config)
 
 	err := hub.Initialize(context.Background())
 	require.NoError(t, err)
 	defer hub.Close()
 
-	err = hub.RegisterTopic("test", 100)
+	err = hub.RegisterTopic("test")
 	require.NoError(t, err)
 
 	// Register subscription
@@ -1040,10 +1047,10 @@ func TestEventHub_PublishAndSubscribe(t *testing.T) {
 	err = hub.PublishEvent(context.Background(), "test", data)
 	require.NoError(t, err)
 
-	// Wait for event delivery
+	// Wait for event delivery via polling
 	select {
 	case events := <-eventChan:
-		assert.Len(t, events, 1)
+		assert.GreaterOrEqual(t, len(events), 1)
 		assert.Equal(t, TopicName("test"), events[0].TopicName)
 	case <-time.After(time.Second):
 		t.Fatal("Timeout waiting for event")
@@ -1061,7 +1068,7 @@ func TestEventHub_CleanUpEvents(t *testing.T) {
 	require.NoError(t, err)
 	defer hub.Close()
 
-	err = hub.RegisterTopic("test", 100)
+	err = hub.RegisterTopic("test")
 	require.NoError(t, err)
 
 	// Publish events
@@ -1081,13 +1088,60 @@ func TestEventHub_CleanUpEvents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, count)
 }
+
+func TestEventHub_PollerDetectsChanges(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	logger := zap.NewNop()
+	config := DefaultConfig()
+	config.PollInterval = 50 * time.Millisecond
+	hub := New(db, logger, config)
+
+	err := hub.Initialize(context.Background())
+	require.NoError(t, err)
+	defer hub.Close()
+
+	err = hub.RegisterTopic("test")
+	require.NoError(t, err)
+
+	eventChan := make(chan []Event, 10)
+	err = hub.RegisterSubscription("test", eventChan)
+	require.NoError(t, err)
+
+	// Publish multiple events
+	for i := 0; i < 3; i++ {
+		data, _ := json.Marshal(map[string]int{"index": i})
+		err = hub.PublishEvent(context.Background(), "test", data)
+		require.NoError(t, err)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Wait for events to be delivered
+	var receivedEvents []Event
+	timeout := time.After(500 * time.Millisecond)
+
+	for {
+		select {
+		case events := <-eventChan:
+			receivedEvents = append(receivedEvents, events...)
+			if len(receivedEvents) >= 3 {
+				assert.Len(t, receivedEvents, 3)
+				return
+			}
+		case <-timeout:
+			t.Fatalf("Timeout: received only %d events", len(receivedEvents))
+		}
+	}
+}
 ```
 
 **Checklist:**
 - [ ] Create `eventhub_test.go` with test setup helpers
 - [ ] Test RegisterTopic success and error cases
-- [ ] Test PublishEvent and subscription delivery
+- [ ] Test PublishEvent and subscription delivery via polling
 - [ ] Test CleanUpEvents functionality
+- [ ] Test poller detects state changes correctly
 - [ ] Test graceful shutdown
 
 ---
@@ -1099,9 +1153,9 @@ Execute these steps in order for a clean implementation:
 | Step | File | Description | Dependencies |
 |------|------|-------------|--------------|
 | 1 | `types.go` | Core types and interface | None |
-| 2 | `topic.go` | Topic registry | Step 1 |
+| 2 | `topic.go` | Topic registry with poll state | Step 1 |
 | 3 | `store.go` | Database operations | Step 1 |
-| 4 | `dispatcher.go` | Background event delivery | Steps 1, 2 |
+| 4 | `poller.go` | Background state polling and event delivery | Steps 1, 2, 3 |
 | 5 | `eventhub.go` | Main implementation | Steps 1-4 |
 | 6 | SQL schema | Database tables | None (can be done first) |
 | 7 | `eventhub_test.go` | Unit tests | Steps 1-5 |
@@ -1110,33 +1164,33 @@ Execute these steps in order for a clean implementation:
 
 ## Key Implementation Notes
 
-### Non-Atomic Design
-Unlike the sync package which uses transactions to ensure atomicity, EventHub explicitly separates state and event updates:
+### Atomic Design
+PublishEvent uses a transaction to ensure event recording and state update are atomic:
 
 ```go
-// Step 1: Record event (can succeed)
-id, err := eh.store.recordEvent(ctx, topicName, event)
-
-// Step 2: Update state (separate operation, may fail independently)
-_, err = eh.store.updateState(ctx, topicName)
+tx, err := s.db.BeginTx(ctx, nil)
+// Insert event
+// Update state
+tx.Commit()
 ```
 
-This is intentional per requirements. If state update fails after event recording, the event is still persisted and delivered.
+### Poll-Based Delivery
+The poller runs on a configurable interval and:
+1. Checks each topic's state version against known version
+2. If version changed, fetches events since `lastPolled` timestamp
+3. Delivers all fetched events as a batch to subscribers
+4. Updates `knownVersion` and `lastPolled`
 
-### Queue Behavior
-The internal queue has overflow behavior:
-- Default: Drop events when queue is full
-- Alternative: Could be changed to block or return error
-
-### Batch Delivery
-Events are delivered to subscribers as batches (`[]Event`) based on:
-1. **BatchSize**: When batch reaches configured size
-2. **FlushInterval**: Periodic flush of partial batches
+### Natural Batching
+No separate batching mechanism is needed. Events fetched during each poll cycle naturally form a batch based on:
+- Poll interval timing
+- Events accumulated since last poll
 
 ### Thread Safety
 - `topicRegistry` uses `sync.RWMutex` for concurrent access
 - `topic.subscribers` has its own lock for subscriber modifications
 - `eventHub` has a mutex for initialization state
+- Poll state (`knownVersion`, `lastPolled`) is updated only by the poller goroutine
 
 ---
 
@@ -1146,4 +1200,4 @@ Patterns referenced from sync package (do not import):
 - `pkg/sync/types.go` - Event and state structures
 - `pkg/sync/state_manager.go` - UPSERT pattern for states
 - `pkg/sync/event_store.go` - Event recording and querying
-- `pkg/sync/sync_poller.go` - Background cleanup loop pattern
+- `pkg/sync/sync_poller.go` - Background polling loop pattern with version detection

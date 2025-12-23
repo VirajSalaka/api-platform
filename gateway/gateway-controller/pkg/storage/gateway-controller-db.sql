@@ -157,5 +157,28 @@ CREATE TABLE IF NOT EXISTS llm_template_events (
 
 CREATE INDEX IF NOT EXISTS idx_llm_events_lookup ON llm_template_events(organization_id, processed_timestamp);
 
--- Set schema version to 6
-PRAGMA user_version = 6;
+-- EventHub: Topic States Table (added in schema version 7)
+-- Tracks version information per topic for change detection
+CREATE TABLE IF NOT EXISTS topic_states (
+    topic_name TEXT PRIMARY KEY,
+    version_id TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_topic_states_updated ON topic_states(updated_at);
+
+-- EventHub: Example events table template
+-- Each topic needs its own events table following this pattern:
+-- Table name format: {topic_name}_events
+--
+-- Example for 'api' topic:
+-- CREATE TABLE IF NOT EXISTS api_events (
+--     id INTEGER PRIMARY KEY AUTOINCREMENT,
+--     processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+--     originated_timestamp TIMESTAMP NOT NULL,
+--     event_data TEXT NOT NULL
+-- );
+-- CREATE INDEX IF NOT EXISTS idx_api_events_processed ON api_events(processed_timestamp);
+
+-- Set schema version to 7
+PRAGMA user_version = 7;

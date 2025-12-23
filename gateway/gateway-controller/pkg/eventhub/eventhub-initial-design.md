@@ -26,3 +26,35 @@ Send the success response to the client.
 processAPIEvent would consume the channel used to subscribe and continue on. 
 
 I need step by step implementation as a human engineer do to ease reviewing.
+
+
+This document provides a step-by-step implementation guide for the EventHub package. The EventHub acts as a simple message broker based on database persistence with polling-based delivery.
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           EventHub                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │   Topics     │    │   States     │◄───│   Poller             │  │
+│  │   Registry   │───▶│   Table      │    │   (polls for changes)│  │
+│  │              │    │              │    │                      │  │
+│  └──────────────┘    └──────────────┘    └──────────┬───────────┘  │
+│         │                                           │               │
+│         │                                           │ on change     │
+│         ▼                                           ▼               │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │   Publish    │───▶│   Events     │    │   Subscriptions      │  │
+│  │   (DB write) │    │   Table      │    │   (Channels)         │  │
+│  └──────────────┘    └──────────────┘    └──────────────────────┘  │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Design Decisions:**
+1. **Atomic operations**: States and Events tables are updated atomically
+2. **Poll-based delivery**: Background poller detects state changes, fetches events from DB, delivers to subscribers
+3. **No in-memory queue**: Events go directly to DB; poller fetches and delivers
+4. **Natural batching**: Events fetched during each poll cycle form the batch (no separate batching mechanism)
