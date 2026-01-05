@@ -287,6 +287,164 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 	}, nil
 }
 
+// UpdateAPIConfiguration handles the update of an existing API configuration
+func (s *APIDeploymentService) UpdateAPIConfiguration(handle string, params APIDeploymentParams) (*APIDeploymentResult, error) {
+	// Parse configuration
+	var apiConfig api.APIConfiguration
+	err := s.parser.Parse(params.Data, params.ContentType, &apiConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse configuration: %w", err)
+	}
+
+	// Validate that the handle in the YAML matches the path parameter
+	if apiConfig.Metadata.Name != "" {
+		if apiConfig.Metadata.Name != handle {
+			return nil, fmt.Errorf("handle mismatch: path has '%s' but YAML metadata.name has '%s'", handle, apiConfig.Metadata.Name)
+		}
+	}
+
+	// Validate configuration
+	validationErrors := s.validator.Validate(&apiConfig)
+	if len(validationErrors) > 0 {
+		params.Logger.Warn("Configuration validation failed",
+			zap.String("handle", handle),
+			zap.Int("num_errors", len(validationErrors)))
+
+		for _, e := range validationErrors {
+			params.Logger.Warn("Validation error",
+				zap.String("field", e.Field),
+				zap.String("message", e.Message))
+		}
+		return nil, fmt.Errorf("configuration validation failed with %d errors", len(validationErrors))
+	}
+
+	// Check if config exists
+	var existing *models.StoredConfig
+	if s.db != nil {
+		existing, err = s.db.GetConfigByHandle(handle)
+	} else {
+		existing, err = s.store.GetByHandle(handle)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("API configuration with handle '%s' not found: %w", handle, err)
+	}
+
+	// Update stored configuration
+	now := time.Now()
+	existing.Configuration = apiConfig
+	existing.Status = models.StatusPending
+	existing.UpdatedAt = now
+	existing.DeployedAt = nil
+	existing.DeployedVersion = 0
+
+	if apiConfig.Kind == api.Asyncwebsub {
+		topicsToRegister, topicsToUnregister := s.GetTopicsForUpdate(*existing)
+
+		// Execute topic operations with wait group and errors tracking
+		var wg2 sync.WaitGroup
+		var regErrs int32
+		var deregErrs int32
+
+		if len(topicsToRegister) > 0 {
+			wg2.Add(1)
+			go func(list []string) {
+				defer wg2.Done()
+				params.Logger.Info("Starting topic registration", zap.Int("total_topics", len(list)), zap.String("api_id", existing.ID))
+				var childWg sync.WaitGroup
+				for _, topic := range list {
+					childWg.Add(1)
+					go func(topic string) {
+						defer childWg.Done()
+						if err := s.RegisterTopicWithHub(s.httpClient, topic, "localhost", 8083, params.Logger); err != nil {
+							params.Logger.Error("Failed to register topic with WebSubHub",
+								zap.Error(err),
+								zap.String("topic", topic),
+								zap.String("api_id", existing.ID))
+							atomic.AddInt32(&regErrs, 1)
+						} else {
+							params.Logger.Info("Successfully registered topic with WebSubHub",
+								zap.String("topic", topic),
+								zap.String("api_id", existing.ID))
+						}
+					}(topic)
+				}
+				childWg.Wait()
+			}(topicsToRegister)
+		}
+
+		if len(topicsToUnregister) > 0 {
+			wg2.Add(1)
+			go func(list []string) {
+				defer wg2.Done()
+				params.Logger.Info("Starting topic deregistration", zap.Int("total_topics", len(list)), zap.String("api_id", existing.ID))
+				var childWg sync.WaitGroup
+				for _, topic := range list {
+					childWg.Add(1)
+					go func(topic string) {
+						defer childWg.Done()
+						if err := s.UnregisterTopicWithHub(s.httpClient, topic, "localhost", 8083, params.Logger); err != nil {
+							params.Logger.Error("Failed to deregister topic from WebSubHub",
+								zap.Error(err),
+								zap.String("topic", topic),
+								zap.String("api_id", existing.ID))
+							atomic.AddInt32(&deregErrs, 1)
+						} else {
+							params.Logger.Info("Successfully deregistered topic from WebSubHub",
+								zap.String("topic", topic),
+								zap.String("api_id", existing.ID))
+						}
+					}(topic)
+				}
+				childWg.Wait()
+			}(topicsToUnregister)
+		}
+		wg2.Wait()
+
+		params.Logger.Info("Topic lifecycle operations completed",
+			zap.String("api_id", existing.ID),
+			zap.Int("registered", len(topicsToRegister)),
+			zap.Int("deregistered", len(topicsToUnregister)),
+			zap.Int("register_errors", int(regErrs)),
+			zap.Int("deregister_errors", int(deregErrs)))
+
+		// Check if topic operations failed and return error
+		if regErrs > 0 || deregErrs > 0 {
+			return nil, fmt.Errorf("topic lifecycle operations failed")
+		}
+	}
+
+	// Update database first (only if persistent mode)
+	if s.db != nil {
+		if err := s.db.UpdateConfig(existing); err != nil {
+			return nil, fmt.Errorf("failed to update config in database: %w", err)
+		}
+	}
+
+	if err := s.store.Update(existing); err != nil {
+		return nil, fmt.Errorf("failed to update config in memory store: %w", err)
+	}
+
+	// Update xDS snapshot asynchronously
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := s.snapshotManager.UpdateSnapshot(ctx, params.CorrelationID); err != nil {
+			params.Logger.Error("Failed to update xDS snapshot", zap.Error(err))
+		}
+	}()
+
+	params.Logger.Info("API configuration updated",
+		zap.String("id", existing.ID),
+		zap.String("handle", handle))
+
+	return &APIDeploymentResult{
+		StoredConfig: existing,
+		IsUpdate:     true,
+	}, nil
+}
+
 func (s *APIDeploymentService) GetTopicsForUpdate(apiConfig models.StoredConfig) ([]string, []string) {
 	topics := s.store.TopicManager.GetAllByConfig(apiConfig.ID)
 	topicsToRegister := []string{}

@@ -500,229 +500,63 @@ func (s *APIServer) UpdateAPI(c *gin.Context, id string) {
 		return
 	}
 
-	// Parse configuration
-	contentType := c.GetHeader("Content-Type")
-	var apiConfig api.APIConfiguration
-	err = s.parser.Parse(body, contentType, &apiConfig)
+	// Get correlation ID from context
+	correlationID := middleware.GetCorrelationID(c)
+
+	// Update API configuration using the utility service
+	result, err := s.deploymentService.UpdateAPIConfiguration(handle, utils.APIDeploymentParams{
+		Data:          body,
+		ContentType:   c.GetHeader("Content-Type"),
+		CorrelationID: correlationID,
+		Logger:        log,
+	})
+
 	if err != nil {
-		log.Error("Failed to parse configuration", zap.Error(err))
-		c.JSON(http.StatusBadRequest, api.ErrorResponse{
-			Status:  "error",
-			Message: "Failed to parse configuration",
-		})
-		return
-	}
-
-	// Validate that the handle in the YAML matches the path parameter
-	if apiConfig.Metadata.Name != "" {
-		if apiConfig.Metadata.Name != handle {
-			log.Warn("Handle mismatch between path and YAML metadata",
-				zap.String("path_handle", handle),
-				zap.String("yaml_handle", apiConfig.Metadata.Name))
-			c.JSON(http.StatusBadRequest, api.ErrorResponse{
-				Status:  "error",
-				Message: fmt.Sprintf("Handle mismatch: path has '%s' but YAML metadata.name has '%s'", handle, apiConfig.Metadata.Name),
-			})
-			return
-		}
-	}
-
-	// Validate configuration
-	validationErrors := s.validator.Validate(&apiConfig)
-	if len(validationErrors) > 0 {
-		log.Warn("Configuration validation failed",
-			zap.String("handle", handle),
-			zap.Int("num_errors", len(validationErrors)))
-
-		errors := make([]api.ValidationError, len(validationErrors))
-		for i, e := range validationErrors {
-			errors[i] = api.ValidationError{
-				Field:   stringPtr(e.Field),
-				Message: stringPtr(e.Message),
-			}
-		}
-
-		c.JSON(http.StatusBadRequest, api.ErrorResponse{
-			Status:  "error",
-			Message: "Configuration validation failed",
-			Errors:  &errors,
-		})
-		return
-	}
-
-	if s.db == nil {
-		c.JSON(http.StatusServiceUnavailable, api.ErrorResponse{
-			Status:  "error",
-			Message: "Database storage not available",
-		})
-		return
-	}
-
-	// Check if config exists
-	existing, err := s.db.GetConfigByHandle(handle)
-	if err != nil {
-		log.Warn("API configuration not found",
-			zap.String("handle", handle))
-		c.JSON(http.StatusNotFound, api.ErrorResponse{
-			Status:  "error",
-			Message: fmt.Sprintf("API configuration with handle '%s' not found", handle),
-		})
-		return
-	}
-
-	// Update stored configuration
-	now := time.Now()
-	existing.Configuration = apiConfig
-	existing.Status = models.StatusPending
-	existing.UpdatedAt = now
-	existing.DeployedAt = nil
-	existing.DeployedVersion = 0
-
-	if apiConfig.Kind == api.Asyncwebsub {
-		topicsToRegister, topicsToUnregister := s.deploymentService.GetTopicsForUpdate(*existing)
-		// TODO: Pre configure the dynamic forward proxy rules for event gw
-		// This was communication bridge will be created on the gw startup
-		// Can perform internal communication with websub hub without relying on the dynamic rules
-		// Execute topic operations with wait group and errors tracking
-		var wg2 sync.WaitGroup
-		var regErrs int32
-		var deregErrs int32
-
-		if len(topicsToRegister) > 0 {
-			wg2.Add(1)
-			go func(list []string) {
-				defer wg2.Done()
-				log.Info("Starting topic registration", zap.Int("total_topics", len(list)), zap.String("api_id", existing.ID))
-				//fmt.Println("Topics Registering Started")
-				var childWg sync.WaitGroup
-				for _, topic := range list {
-					childWg.Add(1)
-					go func(topic string) {
-						defer childWg.Done()
-						if err := s.deploymentService.RegisterTopicWithHub(s.httpClient, topic, "localhost", 8083, log); err != nil {
-							log.Error("Failed to register topic with WebSubHub",
-								zap.Error(err),
-								zap.String("topic", topic),
-								zap.String("api_id", existing.ID))
-							atomic.AddInt32(&regErrs, 1)
-						} else {
-							log.Info("Successfully registered topic with WebSubHub",
-								zap.String("topic", topic),
-								zap.String("api_id", existing.ID))
-						}
-					}(topic)
-				}
-				childWg.Wait()
-			}(topicsToRegister)
-		}
-
-		if len(topicsToUnregister) > 0 {
-			wg2.Add(1)
-			go func(list []string) {
-				defer wg2.Done()
-				log.Info("Starting topic deregistration", zap.Int("total_topics", len(list)), zap.String("api_id", existing.ID))
-				var childWg sync.WaitGroup
-				for _, topic := range list {
-					childWg.Add(1)
-					go func(topic string) {
-						defer childWg.Done()
-						if err := s.deploymentService.UnregisterTopicWithHub(s.httpClient, topic, "localhost", 8083, log); err != nil {
-							log.Error("Failed to deregister topic from WebSubHub",
-								zap.Error(err),
-								zap.String("topic", topic),
-								zap.String("api_id", existing.ID))
-							atomic.AddInt32(&deregErrs, 1)
-						} else {
-							log.Info("Successfully deregistered topic from WebSubHub",
-								zap.String("topic", topic),
-								zap.String("api_id", existing.ID))
-						}
-					}(topic)
-				}
-				childWg.Wait()
-			}(topicsToUnregister)
-		}
-		wg2.Wait()
-
-		log.Info("Topic lifecycle operations completed",
-			zap.String("api_id", existing.ID),
-			zap.Int("registered", len(topicsToRegister)),
-			zap.Int("deregistered", len(topicsToUnregister)),
-			zap.Int("register_errors", int(regErrs)),
-			zap.Int("deregister_errors", int(deregErrs)))
-
-		// Check if topic operations failed and return error
-		if regErrs > 0 || deregErrs > 0 {
-			log.Error("Failed to register & deregister topics", zap.Error(err))
-			c.JSON(http.StatusInternalServerError, api.ErrorResponse{
-				Status:  "error",
-				Message: "Topic lifecycle operations failed",
-			})
-			return
-		}
-	}
-
-	// Atomic dual-write: database + in-memory
-	// Update database first (only if persistent mode)
-	if s.db != nil {
-		if err := s.db.UpdateConfig(existing); err != nil {
-			log.Error("Failed to update config in database", zap.Error(err))
-			c.JSON(http.StatusInternalServerError, api.ErrorResponse{
-				Status:  "error",
-				Message: "Failed to persist configuration update",
-			})
-			return
-		}
-	}
-
-	if err := s.store.Update(existing); err != nil {
-		// Log conflict errors at info level, other errors at error level
+		// Map errors to HTTP status codes
 		if storage.IsConflictError(err) {
-			log.Info("API configuration handle already exists",
-				zap.String("id", existing.ID),
+			log.Info("API configuration handle conflict",
+				zap.Error(err),
 				zap.String("handle", handle))
 			c.JSON(http.StatusConflict, api.ErrorResponse{
 				Status:  "error",
 				Message: err.Error(),
 			})
+		} else if strings.Contains(err.Error(), "not found") {
+			log.Warn("API configuration not found",
+				zap.String("handle", handle))
+			c.JSON(http.StatusNotFound, api.ErrorResponse{
+				Status:  "error",
+				Message: err.Error(),
+			})
+		} else if strings.Contains(err.Error(), "validation failed") ||
+			strings.Contains(err.Error(), "handle mismatch") ||
+			strings.Contains(err.Error(), "failed to parse") {
+			log.Error("Failed to update API configuration (bad request)", zap.Error(err))
+			c.JSON(http.StatusBadRequest, api.ErrorResponse{
+				Status:  "error",
+				Message: err.Error(),
+			})
 		} else {
-			log.Error("Failed to update config in memory store", zap.Error(err))
+			log.Error("Failed to update API configuration", zap.Error(err))
 			c.JSON(http.StatusInternalServerError, api.ErrorResponse{
 				Status:  "error",
-				Message: "Failed to update configuration in memory store",
+				Message: "Failed to update configuration",
 			})
 		}
 		return
 	}
 
-	// Get correlation ID from context
-	correlationID := middleware.GetCorrelationID(c)
-
-	// Update xDS snapshot asynchronously
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := s.snapshotManager.UpdateSnapshot(ctx, correlationID); err != nil {
-			log.Error("Failed to update xDS snapshot", zap.Error(err))
-		}
-	}()
-
-	log.Info("API configuration updated",
-		zap.String("id", existing.ID),
-		zap.String("handle", handle))
-
 	// Return success response (id is the handle)
 	c.JSON(http.StatusOK, api.APIUpdateResponse{
 		Status:    stringPtr("success"),
 		Message:   stringPtr("API configuration updated successfully"),
-		Id:        stringPtr(existing.GetHandle()),
-		UpdatedAt: timePtr(existing.UpdatedAt),
+		Id:        stringPtr(result.StoredConfig.GetHandle()),
+		UpdatedAt: timePtr(result.StoredConfig.UpdatedAt),
 	})
 
 	// Rebuild and update derived policy configuration
 	if s.policyManager != nil {
-		storedPolicy := s.buildStoredPolicyFromAPI(existing)
+		storedPolicy := s.buildStoredPolicyFromAPI(result.StoredConfig)
 		if storedPolicy != nil {
 			if err := s.policyManager.AddPolicy(storedPolicy); err != nil {
 				log.Error("Failed to update derived policy configuration", zap.Error(err))
@@ -733,7 +567,7 @@ func (s *APIServer) UpdateAPI(c *gin.Context, id string) {
 			}
 		} else {
 			// API no longer has policies, remove the existing policy configuration
-			policyID := existing.ID + "-policies"
+			policyID := result.StoredConfig.ID + "-policies"
 			if err := s.policyManager.RemovePolicy(policyID); err != nil {
 				// Log at debug level since policy may not exist if API never had policies
 				log.Debug("No policy configuration to remove", zap.String("policy_id", policyID))
