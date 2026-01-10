@@ -87,21 +87,26 @@ func AuthMiddleware(config AuthConfig) gin.HandlerFunc {
 			token, _, parseErr := parser.ParseUnverified(tokenString, &CustomClaims{})
 
 			if parseErr != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{
-					"error": fmt.Sprintf("Invalid JWT format: %v", parseErr),
-				})
-				c.Abort()
-				return
-			}
+				// c.JSON(http.StatusUnauthorized, gin.H{
+				// 	"error": fmt.Sprintf("Invalid JWT format: %v", parseErr),
+				// })
+				// c.Abort()
+				// return
 
-			var ok bool
-			claims, ok = token.Claims.(*CustomClaims)
-			if !ok {
-				c.JSON(http.StatusUnauthorized, gin.H{
-					"error": "Invalid token claims",
-				})
-				c.Abort()
-				return
+				// If parsing fails, initialize empty claims and try to get organization from query param
+				claims = &CustomClaims{
+					Organization: c.Query("organizationId"),
+				}
+			} else {
+				var ok bool
+				claims, ok = token.Claims.(*CustomClaims)
+				if !ok {
+					c.JSON(http.StatusUnauthorized, gin.H{
+						"error": "Invalid token claims",
+					})
+					c.Abort()
+					return
+				}
 			}
 		} else {
 			// Parse and validate the token with signature verification
