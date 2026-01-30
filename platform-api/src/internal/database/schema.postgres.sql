@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS apis (
     is_default_version BOOLEAN DEFAULT FALSE,
     type VARCHAR(20) DEFAULT 'HTTP',
     transport VARCHAR(255), -- JSON array as TEXT
+    policies JSONB DEFAULT '[]'::jsonb, -- JSON array as JSONB
     security_enabled BOOLEAN,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

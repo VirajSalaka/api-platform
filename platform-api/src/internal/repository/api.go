@@ -60,20 +60,24 @@ func (r *APIRepo) CreateAPI(api *model.API) error {
 
 	// Convert transport slice to JSON
 	transportJSON, _ := json.Marshal(api.Transport)
+	policiesJSON, err := serializePolicies(api.Policies)
+	if err != nil {
+		return err
+	}
 
 	// Insert main API record
 	apiQuery := `
 		INSERT INTO apis (uuid, handle, name, description, context, version, provider,
 			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
-			type, transport, security_enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			type, transport, policies, security_enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	securityEnabled := api.Security != nil && api.Security.Enabled
 
 	_, err = tx.Exec(r.db.Rebind(apiQuery), api.ID, api.Handle, api.Name, api.Description,
 		api.Context, api.Version, api.Provider, api.ProjectID, api.OrganizationID, api.LifeCycleStatus,
-		api.HasThumbnail, api.IsDefaultVersion, api.Type, string(transportJSON), securityEnabled, api.CreatedAt, api.UpdatedAt)
+		api.HasThumbnail, api.IsDefaultVersion, api.Type, string(transportJSON), policiesJSON, securityEnabled, api.CreatedAt, api.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -130,16 +134,17 @@ func (r *APIRepo) GetAPIByUUID(apiUUID, orgUUID string) (*model.API, error) {
 	query := `
 		SELECT uuid, handle, name, description, context, version, provider,
 			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
-			type, transport, security_enabled, created_at, updated_at
+			type, transport, policies, security_enabled, created_at, updated_at
 		FROM apis WHERE uuid = ? and organization_uuid = ?
 	`
 
 	var transportJSON string
+	var policiesJSON sql.NullString
 	var securityEnabled bool
 	err := r.db.QueryRow(r.db.Rebind(query), apiUUID, orgUUID).Scan(
 		&api.ID, &api.Handle, &api.Name, &api.Description, &api.Context,
 		&api.Version, &api.Provider, &api.ProjectID, &api.OrganizationID, &api.LifeCycleStatus,
-		&api.HasThumbnail, &api.IsDefaultVersion, &api.Type, &transportJSON,
+		&api.HasThumbnail, &api.IsDefaultVersion, &api.Type, &transportJSON, &policiesJSON,
 		&securityEnabled, &api.CreatedAt, &api.UpdatedAt)
 
 	if err != nil {
@@ -152,6 +157,11 @@ func (r *APIRepo) GetAPIByUUID(apiUUID, orgUUID string) (*model.API, error) {
 	// Parse transport JSON
 	if transportJSON != "" {
 		json.Unmarshal([]byte(transportJSON), &api.Transport)
+	}
+	if policies, err := deserializePolicies(policiesJSON); err != nil {
+		return nil, err
+	} else {
+		api.Policies = policies
 	}
 
 	// Load related configurations
@@ -186,7 +196,7 @@ func (r *APIRepo) GetAPIsByProjectUUID(projectUUID, orgUUID string) ([]*model.AP
 	query := `
 		SELECT uuid, handle, name, description, context, version, provider,
 			project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
-			type, transport, security_enabled, created_at, updated_at
+			type, transport, policies, security_enabled, created_at, updated_at
 		FROM apis WHERE project_uuid = ? AND organization_uuid = ? ORDER BY created_at DESC
 	`
 
@@ -200,12 +210,13 @@ func (r *APIRepo) GetAPIsByProjectUUID(projectUUID, orgUUID string) ([]*model.AP
 	for rows.Next() {
 		api := &model.API{}
 		var transportJSON string
+		var policiesJSON sql.NullString
 		var securityEnabled bool
 
 		err := rows.Scan(&api.ID, &api.Handle, &api.Name, &api.Description,
 			&api.Context, &api.Version, &api.Provider, &api.ProjectID, &api.OrganizationID,
 			&api.LifeCycleStatus, &api.HasThumbnail, &api.IsDefaultVersion,
-			&api.Type, &transportJSON, &securityEnabled, &api.CreatedAt, &api.UpdatedAt)
+			&api.Type, &transportJSON, &policiesJSON, &securityEnabled, &api.CreatedAt, &api.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -213,6 +224,11 @@ func (r *APIRepo) GetAPIsByProjectUUID(projectUUID, orgUUID string) ([]*model.AP
 		// Parse transport JSON
 		if transportJSON != "" {
 			json.Unmarshal([]byte(transportJSON), &api.Transport)
+		}
+		if policies, err := deserializePolicies(policiesJSON); err != nil {
+			return nil, err
+		} else {
+			api.Policies = policies
 		}
 
 		// Load related configurations
@@ -236,7 +252,7 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 		query = `
 			SELECT uuid, handle, name, description, context, version, provider,
 				project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
-				type, transport, security_enabled, created_at, updated_at
+				type, transport, policies, security_enabled, created_at, updated_at
 			FROM apis
 			WHERE organization_uuid = ? AND project_uuid = ?
 			ORDER BY created_at DESC
@@ -247,7 +263,7 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 		query = `
 			SELECT uuid, handle, name, description, context, version, provider,
 				project_uuid, organization_uuid, lifecycle_status, has_thumbnail, is_default_version,
-				type, transport, security_enabled, created_at, updated_at
+				type, transport, policies, security_enabled, created_at, updated_at
 			FROM apis
 			WHERE organization_uuid = ?
 			ORDER BY created_at DESC
@@ -265,12 +281,13 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 	for rows.Next() {
 		api := &model.API{}
 		var transportJSON string
+		var policiesJSON sql.NullString
 		var securityEnabled bool
 
 		err := rows.Scan(&api.ID, &api.Handle, &api.Name, &api.Description,
 			&api.Context, &api.Version, &api.Provider, &api.ProjectID, &api.OrganizationID,
 			&api.LifeCycleStatus, &api.HasThumbnail, &api.IsDefaultVersion,
-			&api.Type, &transportJSON, &securityEnabled, &api.CreatedAt, &api.UpdatedAt)
+			&api.Type, &transportJSON, &policiesJSON, &securityEnabled, &api.CreatedAt, &api.UpdatedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -278,6 +295,11 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID *string)
 		// Parse transport JSON
 		if transportJSON != "" {
 			json.Unmarshal([]byte(transportJSON), &api.Transport)
+		}
+		if policies, err := deserializePolicies(policiesJSON); err != nil {
+			return nil, err
+		} else {
+			api.Policies = policies
 		}
 
 		// Load related configurations
@@ -367,18 +389,22 @@ func (r *APIRepo) UpdateAPI(api *model.API) error {
 
 	// Convert transport slice to JSON
 	transportJSON, _ := json.Marshal(api.Transport)
+	policiesJSON, err := serializePolicies(api.Policies)
+	if err != nil {
+		return err
+	}
 	securityEnabled := api.Security != nil && api.Security.Enabled
 
 	// Update main API record
 	query := `
 		UPDATE apis SET description = ?,
 			provider = ?, lifecycle_status = ?, has_thumbnail = ?,
-			is_default_version = ?, type = ?, transport = ?, security_enabled = ?, updated_at = ?
+			is_default_version = ?, type = ?, transport = ?, policies = ?, security_enabled = ?, updated_at = ?
 		WHERE uuid = ?
 	`
 	_, err = tx.Exec(r.db.Rebind(query), api.Description,
 		api.Provider, api.LifeCycleStatus,
-		api.HasThumbnail, api.IsDefaultVersion, api.Type, string(transportJSON),
+		api.HasThumbnail, api.IsDefaultVersion, api.Type, string(transportJSON), policiesJSON,
 		securityEnabled, api.UpdatedAt, api.ID)
 	if err != nil {
 		return err
