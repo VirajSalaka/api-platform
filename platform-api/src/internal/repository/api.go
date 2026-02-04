@@ -891,12 +891,35 @@ func (r *APIRepo) loadRateLimitingConfig(apiId string) (*model.RateLimitingConfi
 func operationKey(method, path string) (string, error) {
 	method = strings.TrimSpace(method)
 	path = strings.TrimSpace(path)
-	// TODO: (VirajSalaka) Validate method names based on OpenAPI spec (GET, POST, PUT, DELETE, etc.)
+	
 	if method == "" || path == "" {
 		return "", errors.New("operation method and path are required")
 	}
-	// TODO: (VirajSalaka) Needs to handle path consistently when path parameters are involved; 
-	// If there are query parameters, they should be removed in the key.
+	if queryIdx := strings.IndexByte(path, '?'); queryIdx != -1 {
+		path = strings.TrimSpace(path[:queryIdx])
+		if path == "" {
+			return "", errors.New("operation method and path are required")
+		}
+	}
+
+	if braceIdx := strings.IndexByte(path, '{'); braceIdx != -1 {
+		var builder strings.Builder
+		builder.Grow(len(path))
+		for i := 0; i < len(path); i++ {
+			if path[i] != '{' {
+				builder.WriteByte(path[i])
+				continue
+			}
+			end := strings.IndexByte(path[i+1:], '}')
+			if end == -1 {
+				builder.WriteString(path[i:])
+				break
+			}
+			builder.WriteString("{}")
+			i += end + 1
+		}
+		path = builder.String()
+	}
 	return strings.ToUpper(method) + " " + strings.ToLower(path), nil
 }
 
