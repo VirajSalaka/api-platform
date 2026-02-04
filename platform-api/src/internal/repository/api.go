@@ -891,7 +891,7 @@ func (r *APIRepo) loadRateLimitingConfig(apiId string) (*model.RateLimitingConfi
 func operationKey(method, path string) (string, error) {
 	method = strings.TrimSpace(method)
 	path = strings.TrimSpace(path)
-	// TODO: (VirajSalaka) Validate method names based on OpenAPI spec (GET, POST, PUT, DELETE, etc.)
+
 	if method == "" || path == "" {
 		return "", errors.New("operation method and path are required")
 	}
