@@ -54,6 +54,8 @@ type APIRepository interface {
 	GetAPIsByGatewayUUID(gatewayUUID, orgUUID string) ([]*model.API, error)
 	GetDeployedAPIsByGatewayUUID(gatewayUUID, orgUUID string) ([]*model.API, error)
 	UpdateAPI(api *model.API) error
+	SyncAPIOperations(apiUUID, orgUUID string, operations []model.Operation) error
+	SyncAPIChannels(apiUUID, orgUUID string, channels []model.Channel) error
 	DeleteAPI(apiUUID, orgUUID string) error
 
 	// Deployment artifact methods (immutable deployments)

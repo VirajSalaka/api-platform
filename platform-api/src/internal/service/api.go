@@ -329,6 +329,20 @@ func (s *APIService) UpdateAPI(apiUUID string, req *UpdateAPIRequest, orgUUID st
 		return nil, err
 	}
 
+	// TODO: (VirajSalaka) Introduce a query parameter to indicate when it requires operation/channel/backend service updates
+	// This would reduce the load on the database for unchanged resources.
+	if req.Operations != nil {
+		if err := s.apiRepo.SyncAPIOperations(apiUUID, orgUUID, updatedAPIModel.Operations); err != nil {
+			return nil, err
+		}
+	}
+
+	if req.Channels != nil {
+		if err := s.apiRepo.SyncAPIChannels(apiUUID, orgUUID, updatedAPIModel.Channels); err != nil {
+			return nil, err
+		}
+	}
+
 	if req.BackendServices != nil {
 		if err := s.updateAPIBackendServices(apiUUID, req.BackendServices, orgUUID); err != nil {
 			return nil, err

@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"platform-api/src/internal/constants"
@@ -112,7 +113,7 @@ func (r *APIRepo) CreateAPI(api *model.API) error {
 
 	// Insert Operations
 	for _, operation := range api.Operations {
-		if err := r.insertOperation(tx, api.ID, api.OrganizationID, &operation); err != nil {
+		if _, err := r.insertOperationWithID(tx, api.ID, api.OrganizationID, &operation); err != nil {
 			return err
 		}
 	}
@@ -440,16 +441,112 @@ func (r *APIRepo) UpdateAPI(api *model.API) error {
 		}
 	}
 
-	// Re-insert operations
-	for _, operation := range api.Operations {
-		if err := r.insertOperation(tx, api.ID, api.OrganizationID, &operation); err != nil {
+	return tx.Commit()
+}
+
+// SyncAPIOperations updates, inserts, and deletes API operations to match the provided list.
+func (r *APIRepo) SyncAPIOperations(apiUUID, orgUUID string, operations []model.Operation) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	existingOperationIDs, err := r.loadOperationIDsByKey(tx, apiUUID)
+	if err != nil {
+		return err
+	}
+
+	desiredOperations := make(map[string]model.Operation, len(operations))
+	for _, operation := range operations {
+		if operation.Request == nil {
+			return errors.New("operation request is required")
+		}
+		key, err := operationKey(operation.Request.Method, operation.Request.Path)
+		if err != nil {
+			return err
+		}
+		desiredOperations[key] = operation
+	}
+
+	for key, operationID := range existingOperationIDs {
+		if _, ok := desiredOperations[key]; !ok {
+			if err := r.deleteOperationByID(tx, operationID); err != nil {
+				return err
+			}
+		}
+	}
+
+	for key, operation := range desiredOperations {
+		if operationID, ok := existingOperationIDs[key]; ok {
+			if err := r.updateOperationRow(tx, operationID, operation.Name, operation.Description,
+				operation.Request.Method, operation.Request.Path, operation.Request.Authentication, operation.Request.Policies); err != nil {
+				return err
+			}
+			
+			if err := r.replaceOperationBackendServices(tx, operationID, orgUUID, operation.Request.BackendServices); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if _, err := r.insertOperationWithID(tx, apiUUID, orgUUID, &operation); err != nil {
 			return err
 		}
 	}
 
-	// Re-insert channels
-	for _, channel := range api.Channels {
-		if err := r.insertChannel(tx, api.ID, &channel); err != nil {
+	return tx.Commit()
+}
+
+// SyncAPIChannels updates, inserts, and deletes API channels to match the provided list.
+// Channels are stored in the same table as operations, keyed by method + name.
+func (r *APIRepo) SyncAPIChannels(apiUUID, orgUUID string, channels []model.Channel) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	existingOperationIDs, err := r.loadOperationIDsByKey(tx, apiUUID)
+	if err != nil {
+		return err
+	}
+
+	desiredChannels := make(map[string]model.Channel, len(channels))
+	for _, channel := range channels {
+		if channel.Request == nil {
+			return errors.New("channel request is required")
+		}
+		key, err := channelKey(channel.Request.Method, channel.Request.Name)
+		if err != nil {
+			return err
+		}
+		desiredChannels[key] = channel
+	}
+
+	// Expectation is that once resource is added, we do not get a bulk delete of resources in one API Update
+	// hence operations are removed one by one
+	for key, operationID := range existingOperationIDs {
+		if _, ok := desiredChannels[key]; !ok {
+			if err := r.deleteOperationByID(tx, operationID); err != nil {
+				return err
+			}
+		}
+	}
+
+	for key, channel := range desiredChannels {
+		if operationID, ok := existingOperationIDs[key]; ok {
+			if err := r.updateOperationRow(tx, operationID, channel.Name, channel.Description,
+				channel.Request.Method, channel.Request.Name, channel.Request.Authentication, channel.Request.Policies); err != nil {
+				return err
+			}
+			if err := r.replaceOperationBackendServices(tx, operationID, orgUUID, nil); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := r.insertChannel(tx, apiUUID, &channel); err != nil {
 			return err
 		}
 	}
@@ -459,41 +556,13 @@ func (r *APIRepo) UpdateAPI(api *model.API) error {
 
 // DeleteAPI removes an API and all its configurations
 func (r *APIRepo) DeleteAPI(apiUUID, orgUUID string) error {
-	// Start transaction for atomicity
-	tx, err := r.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 
 	// Delete in order of dependencies (children first, parent last)
-	deleteQueries := []string{
-		// Delete API associations first
-		`DELETE FROM api_associations WHERE api_uuid = ?`,
-		// Delete API deployments
-		`DELETE FROM api_deployments WHERE api_uuid = ?`,
-		// Delete other related tables that reference the API
-		`DELETE FROM operation_backend_services WHERE operation_id IN (SELECT id FROM api_operations WHERE api_uuid = ?)`,
-		`DELETE FROM api_operations WHERE api_uuid = ?`,
-		`DELETE FROM api_backend_services WHERE api_uuid = ?`,
-		`DELETE FROM api_rate_limiting WHERE api_uuid = ?`,
-		`DELETE FROM api_cors_config WHERE api_uuid = ?`,
-		`DELETE FROM oauth2_security WHERE api_uuid = ?`,
-		`DELETE FROM api_key_security WHERE api_uuid = ?`,
-		`DELETE FROM api_mtls_config WHERE api_uuid = ?`,
-		`DELETE FROM xhub_signature_security WHERE api_uuid = ?`,
-		// Finally delete the main API record
-		`DELETE FROM apis WHERE uuid = ?`,
+	deleteQuery := `DELETE FROM apis WHERE uuid = ?`
+	if _, err := r.db.Exec(r.db.Rebind(deleteQuery), apiUUID); err != nil {
+		return err
 	}
-
-	// Execute all delete statements
-	for _, query := range deleteQueries {
-		if _, err := tx.Exec(r.db.Rebind(query), apiUUID); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
+	return nil
 }
 
 // CheckAPIExistsByHandleInOrganization checks if an API with the given handle exists within a specific organization
@@ -819,20 +888,95 @@ func (r *APIRepo) loadRateLimitingConfig(apiId string) (*model.RateLimitingConfi
 }
 
 // Helper methods for Operations
-func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId string, operation *model.Operation) error {
+func operationKey(method, path string) (string, error) {
+	method = strings.TrimSpace(method)
+	path = strings.TrimSpace(path)
+	// TODO: (VirajSalaka) Validate method names based on OpenAPI spec (GET, POST, PUT, DELETE, etc.)
+	if method == "" || path == "" {
+		return "", errors.New("operation method and path are required")
+	}
+	// TODO: (VirajSalaka) Needs to handle path consistently when path parameters are involved; 
+	// If there are query parameters, they should be removed in the key.
+	return strings.ToUpper(method) + " " + strings.ToLower(path), nil
+}
+
+func channelKey(method, name string) (string, error) {
+	method = strings.TrimSpace(method)
+	name = strings.TrimSpace(name)
+	if method == "" || name == "" {
+		return "", errors.New("channel method and name are required")
+	}
+	return strings.ToUpper(method) + " " + strings.ToLower(name), nil
+}
+
+func authConfigToFields(auth *model.AuthenticationConfig) (bool, string) {
 	var authRequired bool
 	var scopesJSON string
-	var err error
-	if operation.Request.Authentication != nil {
-		authRequired = operation.Request.Authentication.Required
-		if len(operation.Request.Authentication.Scopes) > 0 {
-			scopesBytes, _ := json.Marshal(operation.Request.Authentication.Scopes)
+	if auth != nil {
+		authRequired = auth.Required
+		if len(auth.Scopes) > 0 {
+			scopesBytes, _ := json.Marshal(auth.Scopes)
 			scopesJSON = string(scopesBytes)
 		}
 	}
-	policiesValue, err := serializePolicies(operation.Request.Policies)
+	return authRequired, scopesJSON
+}
+
+func (r *APIRepo) loadOperationIDsByKey(tx *sql.Tx, apiId string) (map[string]int64, error) {
+	query := `
+		SELECT id, method, path
+		FROM api_operations WHERE api_uuid = ?
+	`
+	rows, err := tx.Query(r.db.Rebind(query), apiId)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	operationIDs := make(map[string]int64)
+	for rows.Next() {
+		var operationID int64
+		var method string
+		var path string
+		if err := rows.Scan(&operationID, &method, &path); err != nil {
+			return nil, err
+		}
+		key, err := operationKey(method, path)
+		if err != nil {
+			return nil, err
+		}
+		operationIDs[key] = operationID
+	}
+
+	return operationIDs, rows.Err()
+}
+
+func (r *APIRepo) updateOperationRow(tx *sql.Tx, operationID int64, name, description, method, path string,
+	auth *model.AuthenticationConfig, policies []model.Policy) error {
+	authRequired, scopesJSON := authConfigToFields(auth)
+	policiesValue, err := serializePolicies(policies)
 	if err != nil {
 		return err
+	}
+
+	query := `
+		UPDATE api_operations
+		SET name = ?, description = ?, method = ?, path = ?, authentication_required = ?, scopes = ?, policies = ?
+		WHERE id = ?
+	`
+	_, err = tx.Exec(r.db.Rebind(query), name, description, method, path, authRequired, scopesJSON, policiesValue, operationID)
+	return err
+}
+
+func (r *APIRepo) insertOperationWithID(tx *sql.Tx, apiId string, organizationId string, operation *model.Operation) (int64, error) {
+	if operation == nil || operation.Request == nil {
+		return 0, errors.New("operation request is required")
+	}
+
+	authRequired, scopesJSON := authConfigToFields(operation.Request.Authentication)
+	policiesValue, err := serializePolicies(operation.Request.Policies)
+	if err != nil {
+		return 0, err
 	}
 
 	// Insert operation
@@ -846,7 +990,7 @@ func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId strin
 		`
 		if err := tx.QueryRow(r.db.Rebind(opQuery), apiId, operation.Name, operation.Description,
 			operation.Request.Method, operation.Request.Path, authRequired, scopesJSON, policiesValue).Scan(&operationID); err != nil {
-			return err
+			return 0, err
 		}
 	} else {
 		// SQLite (and other drivers that support LastInsertId)
@@ -857,23 +1001,34 @@ func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId strin
 		result, err := tx.Exec(r.db.Rebind(opQuery), apiId, operation.Name, operation.Description,
 			operation.Request.Method, operation.Request.Path, authRequired, scopesJSON, policiesValue)
 		if err != nil {
-			return err
+			return 0, err
 		}
 
-		var lastID int64
-		lastID, err = result.LastInsertId()
+		operationID, err = result.LastInsertId()
 		if err != nil {
-			return err
+			return 0, err
 		}
-		operationID = lastID
 	}
 
-	// Insert backend services routing
-	for _, backendRouting := range operation.Request.BackendServices {
+	if err := r.replaceOperationBackendServices(tx, operationID, organizationId, operation.Request.BackendServices); err != nil {
+		return 0, err
+	}
+
+	return operationID, nil
+}
+
+func (r *APIRepo) replaceOperationBackendServices(tx *sql.Tx, operationID int64, organizationId string,
+	backendServices []model.BackendRouting) error {
+	deleteQuery := `DELETE FROM operation_backend_services WHERE operation_id = ?`
+	if _, err := tx.Exec(r.db.Rebind(deleteQuery), operationID); err != nil {
+		return err
+	}
+
+	for _, backendRouting := range backendServices {
 		// Look up backend service UUID by name and organization ID
 		var backendServiceUUID string
 		lookupQuery := `SELECT uuid FROM backend_services WHERE name = ? AND organization_uuid = ?`
-		err = tx.QueryRow(r.db.Rebind(lookupQuery), backendRouting.Name, organizationId).Scan(&backendServiceUUID)
+		err := tx.QueryRow(r.db.Rebind(lookupQuery), backendRouting.Name, organizationId).Scan(&backendServiceUUID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("backend service with name '%s' not found in organization", backendRouting.Name)
@@ -888,6 +1043,15 @@ func (r *APIRepo) insertOperation(tx *sql.Tx, apiId string, organizationId strin
 		if _, err = tx.Exec(r.db.Rebind(bsQuery), operationID, backendServiceUUID, backendRouting.Weight); err != nil {
 			return err
 		}
+	}
+
+	return nil
+}
+
+func (r *APIRepo) deleteOperationByID(tx *sql.Tx, operationID int64) error {
+	deleteOpQuery := `DELETE FROM api_operations WHERE id = ?`
+	if _, err := tx.Exec(r.db.Rebind(deleteOpQuery), operationID); err != nil {
+		return err
 	}
 
 	return nil
@@ -1101,9 +1265,6 @@ func deserializePolicies(policiesJSON sql.NullString) ([]model.Policy, error) {
 func (r *APIRepo) deleteAPIConfigurations(tx *sql.Tx, apiId string) error {
 	// Delete in reverse order of dependencies
 	queries := []string{
-		`DELETE FROM operation_backend_services WHERE operation_id IN (SELECT id FROM api_operations WHERE api_uuid = ?)`,
-		`DELETE FROM api_operations WHERE api_uuid = ?`,
-		`DELETE FROM api_backend_services WHERE api_uuid = ?`, // Remove API-backend service associations
 		`DELETE FROM api_rate_limiting WHERE api_uuid = ?`,
 		`DELETE FROM api_cors_config WHERE api_uuid = ?`,
 		`DELETE FROM oauth2_security WHERE api_uuid = ?`,

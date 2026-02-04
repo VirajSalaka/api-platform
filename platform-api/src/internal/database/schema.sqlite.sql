@@ -204,7 +204,8 @@ CREATE TABLE IF NOT EXISTS api_operations (
     authentication_required BOOLEAN,
     scopes TEXT, -- JSON array as TEXT
     policies TEXT DEFAULT '[]', -- JSON array as TEXT
-    FOREIGN KEY (api_uuid) REFERENCES apis(uuid) ON DELETE CASCADE
+    FOREIGN KEY (api_uuid) REFERENCES apis(uuid) ON DELETE CASCADE,
+    UNIQUE(api_uuid, path, method)
 );
 
 -- Operation Backend Services (routing) table
