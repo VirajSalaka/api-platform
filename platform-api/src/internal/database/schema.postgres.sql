@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS apis (
     type VARCHAR(20) DEFAULT 'HTTP',
     transport VARCHAR(255), -- JSON array as TEXT
     policies JSONB DEFAULT '[]'::jsonb, -- JSON array as JSONB
+    operations JSONB DEFAULT '[]'::jsonb, -- JSON array as JSONB
     security_enabled BOOLEAN,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -191,31 +192,6 @@ CREATE TABLE IF NOT EXISTS api_rate_limiting (
     rate_limit_time_unit VARCHAR(10),
     stop_on_quota_reach BOOLEAN DEFAULT TRUE,
     FOREIGN KEY (api_uuid) REFERENCES apis(uuid) ON DELETE CASCADE
-);
-
--- API Operations table
-CREATE TABLE IF NOT EXISTS api_operations (
-    id SERIAL PRIMARY KEY,
-    api_uuid VARCHAR(40) NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    description VARCHAR(1023),
-    method VARCHAR(10) NOT NULL,
-    path VARCHAR(255) NOT NULL,
-    authentication_required BOOLEAN,
-    scopes TEXT, -- JSON array as TEXT
-    policies JSONB DEFAULT '[]'::jsonb, -- JSON array as JSONB
-    FOREIGN KEY (api_uuid) REFERENCES apis(uuid) ON DELETE CASCADE
-);
-
--- Operation Backend Services (routing) table
-CREATE TABLE IF NOT EXISTS operation_backend_services (
-    id SERIAL PRIMARY KEY,
-    operation_id INTEGER NOT NULL,
-    backend_service_uuid VARCHAR(40) NOT NULL,
-    weight INTEGER,
-    FOREIGN KEY (operation_id) REFERENCES api_operations(id) ON DELETE CASCADE,
-    FOREIGN KEY (backend_service_uuid) REFERENCES backend_services(uuid) ON DELETE CASCADE,
-    UNIQUE(operation_id, backend_service_uuid)
 );
 
 -- Gateways table (scoped to organizations)
@@ -359,9 +335,6 @@ CREATE INDEX IF NOT EXISTS idx_backend_services_name_org ON backend_services(nam
 CREATE INDEX IF NOT EXISTS idx_api_backend_services_api_uuid ON api_backend_services(api_uuid);
 CREATE INDEX IF NOT EXISTS idx_api_backend_services_backend_uuid ON api_backend_services(backend_service_uuid);
 CREATE INDEX IF NOT EXISTS idx_backend_endpoints_service_id ON backend_endpoints(backend_service_uuid);
-CREATE INDEX IF NOT EXISTS idx_api_operations_api_uuid ON api_operations(api_uuid);
-CREATE INDEX IF NOT EXISTS idx_operation_backend_services_operation_id ON operation_backend_services(operation_id);
-CREATE INDEX IF NOT EXISTS idx_operation_backend_services_backend_uuid ON operation_backend_services(backend_service_uuid);
 CREATE INDEX IF NOT EXISTS idx_gateways_org ON gateways(organization_uuid);
 CREATE INDEX IF NOT EXISTS idx_gateway_tokens_status ON gateway_tokens(gateway_uuid, status);
 CREATE INDEX IF NOT EXISTS idx_api_deployments_api_gateway ON api_deployments(api_uuid, gateway_uuid);
