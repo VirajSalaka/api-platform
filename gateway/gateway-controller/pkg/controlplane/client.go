@@ -36,6 +36,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/lazyresourcexds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policy"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"
@@ -134,6 +135,7 @@ func NewClient(
 	policyDefinitions map[string]api.PolicyDefinition,
 	lazyResourceManager *lazyresourcexds.LazyResourceStateManager,
 	templateDefinitions map[string]*api.LLMProviderTemplate,
+	eventHub eventhub.EventHub,
 ) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -145,7 +147,7 @@ func NewClient(
 		snapshotManager:   snapshotManager,
 		parser:            config.NewParser(),
 		validator:         validator,
-		deploymentService: utils.NewAPIDeploymentService(store, db, snapshotManager, validator, routerConfig, nil),
+		deploymentService: utils.NewAPIDeploymentService(store, db, snapshotManager, validator, routerConfig, eventHub),
 		apiKeyService:     utils.NewAPIKeyService(store, db, apiKeyXDSManager, apiKeyConfig),
 		apiKeyXDSManager:  apiKeyXDSManager,
 		routerConfig:      routerConfig,
