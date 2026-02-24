@@ -310,18 +310,13 @@ func main() {
 	}
 	log.Info("Default llm provider templates loaded", slog.Int("count", len(templateDefinitions)))
 
-	// Initialize EventHub and EventListener for multi-replica sync (if enabled)
+	// Initialize EventHub and EventListener for multi-replica sync (when persistent storage is available)
 	var eventHubInstance eventhub.EventHub
 	var evtListener *eventlistener.EventListener
-	if cfg.Controller.Server.EnableReplicaSync {
-		if !cfg.IsPersistentMode() {
-			log.Error("enable_replica_sync requires persistent storage mode (sqlite or postgres)")
-			os.Exit(1)
-		}
-
+	if cfg.IsPersistentMode() {
 		sqlDB := db.GetDB()
 		if sqlDB == nil {
-			log.Error("enable_replica_sync requires a SQL-backed storage with GetDB() support")
+			log.Error("EventHub requires a SQL-backed storage with GetDB() support")
 			os.Exit(1)
 		}
 
@@ -400,7 +395,7 @@ func main() {
 
 	// Initialize API server with the configured validator and API key manager
 	apiServer := handlers.NewAPIServer(configStore, db, snapshotManager, policyManager, lazyResourceXDSManager, log, cpClient,
-		policyDefinitions, templateDefinitions, validator, apiKeyXDSManager, cfg, eventHubInstance, cfg.Controller.Server.EnableReplicaSync)
+		policyDefinitions, templateDefinitions, validator, apiKeyXDSManager, cfg, eventHubInstance)
 
 	// Ensure initial lazy resource snapshot includes default templates loaded from files.
 	// At this point, the API server initialization has already persisted/published OOB templates.

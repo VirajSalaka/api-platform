@@ -65,15 +65,14 @@ func (e *ValidationErrorListError) Error() string {
 
 // APIDeploymentService provides utilities for API configuration deployment
 type APIDeploymentService struct {
-	store                  *storage.ConfigStore
-	db                     storage.Storage
-	snapshotManager        *xds.SnapshotManager
-	parser                 *config.Parser
-	validator              config.Validator
-	routerConfig           *config.RouterConfig
-	httpClient             *http.Client
-	eventHub               eventhub.EventHub
-	enableMultiReplicaMode bool
+	store           *storage.ConfigStore
+	db              storage.Storage
+	snapshotManager *xds.SnapshotManager
+	parser          *config.Parser
+	validator       config.Validator
+	routerConfig    *config.RouterConfig
+	httpClient      *http.Client
+	eventHub        eventhub.EventHub
 }
 
 // NewAPIDeploymentService creates a new API deployment service
@@ -83,6 +82,7 @@ func NewAPIDeploymentService(
 	snapshotManager *xds.SnapshotManager,
 	validator config.Validator,
 	routerConfig *config.RouterConfig,
+	hub eventhub.EventHub,
 ) *APIDeploymentService {
 	return &APIDeploymentService{
 		store:           store,
@@ -92,35 +92,13 @@ func NewAPIDeploymentService(
 		validator:       validator,
 		httpClient:      &http.Client{Timeout: 10 * time.Second},
 		routerConfig:    routerConfig,
+		eventHub:        hub,
 	}
 }
 
-// NewAPIDeploymentServiceWithEventHub creates an API deployment service with event hub support
-func NewAPIDeploymentServiceWithEventHub(
-	store *storage.ConfigStore,
-	db storage.Storage,
-	snapshotManager *xds.SnapshotManager,
-	validator config.Validator,
-	routerConfig *config.RouterConfig,
-	hub eventhub.EventHub,
-	enableMultiReplicaMode bool,
-) *APIDeploymentService {
-	return &APIDeploymentService{
-		store:                  store,
-		db:                     db,
-		snapshotManager:        snapshotManager,
-		parser:                 config.NewParser(),
-		validator:              validator,
-		httpClient:             &http.Client{Timeout: 10 * time.Second},
-		routerConfig:           routerConfig,
-		eventHub:               hub,
-		enableMultiReplicaMode: enableMultiReplicaMode,
-	}
-}
-
-// publishEvent publishes an event to the event hub if multi-replica mode is enabled
+// publishEvent publishes an event to the event hub
 func (s *APIDeploymentService) publishEvent(eventType eventhub.EventType, action, entityID, correlationID string, logger *slog.Logger) {
-	if !s.enableMultiReplicaMode || s.eventHub == nil {
+	if s.eventHub == nil {
 		return
 	}
 

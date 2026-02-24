@@ -95,14 +95,8 @@ func NewAPIServer(
 	apiKeyXDSManager *apikeyxds.APIKeyStateManager,
 	systemConfig *config.Config,
 	eventHubInstance eventhub.EventHub,
-	enableMultiReplicaMode bool,
 ) *APIServer {
-	var deploymentService *utils.APIDeploymentService
-	if eventHubInstance != nil {
-		deploymentService = utils.NewAPIDeploymentServiceWithEventHub(store, db, snapshotManager, validator, &systemConfig.Router, eventHubInstance, enableMultiReplicaMode)
-	} else {
-		deploymentService = utils.NewAPIDeploymentService(store, db, snapshotManager, validator, &systemConfig.Router)
-	}
+	deploymentService := utils.NewAPIDeploymentService(store, db, snapshotManager, validator, &systemConfig.Router, eventHubInstance)
 	policyVersionResolver := utils.NewLoadedPolicyVersionResolver(policyDefinitions)
 	policyValidator := config.NewPolicyValidator(policyDefinitions)
 	server := &APIServer{

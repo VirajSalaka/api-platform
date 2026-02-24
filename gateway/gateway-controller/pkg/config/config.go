@@ -173,11 +173,10 @@ type TracingConfig struct {
 
 // ServerConfig holds server-related configuration
 type ServerConfig struct {
-	APIPort            int           `koanf:"api_port"`
-	XDSPort            int           `koanf:"xds_port"`
-	ShutdownTimeout    time.Duration `koanf:"shutdown_timeout"`
-	GatewayID          string        `koanf:"gateway_id"`
-	EnableReplicaSync  bool          `koanf:"enable_replica_sync"`
+	APIPort         int           `koanf:"api_port"`
+	XDSPort         int           `koanf:"xds_port"`
+	ShutdownTimeout time.Duration `koanf:"shutdown_timeout"`
+	GatewayID       string        `koanf:"gateway_id"`
 }
 
 // AdminServerConfig holds controller admin HTTP server configuration.
