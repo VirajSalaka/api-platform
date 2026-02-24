@@ -32,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/xds"
@@ -64,13 +65,15 @@ func (e *ValidationErrorListError) Error() string {
 
 // APIDeploymentService provides utilities for API configuration deployment
 type APIDeploymentService struct {
-	store           *storage.ConfigStore
-	db              storage.Storage
-	snapshotManager *xds.SnapshotManager
-	parser          *config.Parser
-	validator       config.Validator
-	routerConfig    *config.RouterConfig
-	httpClient      *http.Client
+	store                  *storage.ConfigStore
+	db                     storage.Storage
+	snapshotManager        *xds.SnapshotManager
+	parser                 *config.Parser
+	validator              config.Validator
+	routerConfig           *config.RouterConfig
+	httpClient             *http.Client
+	eventHub               eventhub.EventHub
+	enableMultiReplicaMode bool
 }
 
 // NewAPIDeploymentService creates a new API deployment service
@@ -89,6 +92,59 @@ func NewAPIDeploymentService(
 		validator:       validator,
 		httpClient:      &http.Client{Timeout: 10 * time.Second},
 		routerConfig:    routerConfig,
+	}
+}
+
+// NewAPIDeploymentServiceWithEventHub creates an API deployment service with event hub support
+func NewAPIDeploymentServiceWithEventHub(
+	store *storage.ConfigStore,
+	db storage.Storage,
+	snapshotManager *xds.SnapshotManager,
+	validator config.Validator,
+	routerConfig *config.RouterConfig,
+	hub eventhub.EventHub,
+	enableMultiReplicaMode bool,
+) *APIDeploymentService {
+	return &APIDeploymentService{
+		store:                  store,
+		db:                     db,
+		snapshotManager:        snapshotManager,
+		parser:                 config.NewParser(),
+		validator:              validator,
+		httpClient:             &http.Client{Timeout: 10 * time.Second},
+		routerConfig:           routerConfig,
+		eventHub:               hub,
+		enableMultiReplicaMode: enableMultiReplicaMode,
+	}
+}
+
+// publishEvent publishes an event to the event hub if multi-replica mode is enabled
+func (s *APIDeploymentService) publishEvent(eventType eventhub.EventType, action, entityID, correlationID string, logger *slog.Logger) {
+	if !s.enableMultiReplicaMode || s.eventHub == nil {
+		return
+	}
+
+	event := eventhub.Event{
+		OrganizationID:      "default",
+		OriginatedTimestamp: time.Now(),
+		EventType:          eventType,
+		Action:             action,
+		EntityID:           entityID,
+		CorrelationID:      correlationID,
+		EventData:          fmt.Sprintf(`{"entity_id":"%s","action":"%s"}`, entityID, action),
+	}
+
+	if err := s.eventHub.PublishEvent("default", event); err != nil {
+		logger.Warn("Failed to publish event to event hub",
+			slog.String("event_type", string(eventType)),
+			slog.String("action", action),
+			slog.String("entity_id", entityID),
+			slog.Any("error", err))
+	} else {
+		logger.Debug("Published event to event hub",
+			slog.String("event_type", string(eventType)),
+			slog.String("action", action),
+			slog.String("entity_id", entityID))
 	}
 }
 
@@ -316,6 +372,13 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 				slog.String("correlation_id", params.CorrelationID))
 		}
 	}()
+
+	// Publish event to event hub for multi-replica sync
+	if isUpdate {
+		s.publishEvent(eventhub.EventTypeAPI, "UPDATE", apiID, params.CorrelationID, params.Logger)
+	} else {
+		s.publishEvent(eventhub.EventTypeAPI, "CREATE", apiID, params.CorrelationID, params.Logger)
+	}
 
 	return &APIDeploymentResult{
 		StoredConfig: storedCfg,

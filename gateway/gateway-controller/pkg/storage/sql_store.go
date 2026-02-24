@@ -1451,6 +1451,11 @@ func (s *sqlStore) RemoveAPIKeyAPIAndName(apiId, name string) error {
 	return nil
 }
 
+// GetDB returns the underlying *sql.DB instance.
+func (s *sqlStore) GetDB() *sql.DB {
+	return s.db
+}
+
 // Close closes the database connection
 func (s *sqlStore) Close() error {
 	backend := s.backendName

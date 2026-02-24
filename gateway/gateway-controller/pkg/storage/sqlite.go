@@ -91,7 +91,7 @@ func (s *SQLiteStorage) initSchema() error {
 	}
 
 	if version == 0 {
-		s.logger.Info("Initializing database schema (version 8)")
+		s.logger.Info("Initializing database schema (version 10)")
 		s.logger.Debug("Creating schema with SQL", slog.String("schema_sql", schemaSQL))
 
 		// Execute schema creation SQL
@@ -714,11 +714,49 @@ func (s *SQLiteStorage) initSchema() error {
 			s.logger.Info("Schema migrated to version 9 (removed index_key)")
 			version = 9
 		}
+
+		if version == 9 {
+			s.logger.Info("Migrating schema to version 10 (adding organization_states and events tables)")
+
+			if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS organization_states (
+				organization TEXT PRIMARY KEY,
+				version_id TEXT NOT NULL DEFAULT '',
+				updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+			);`); err != nil {
+				return fmt.Errorf("failed to create organization_states table: %w", err)
+			}
+
+			if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS events (
+				organization_id TEXT NOT NULL,
+				processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				originated_timestamp TIMESTAMP NOT NULL,
+				event_type TEXT NOT NULL,
+				action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+				entity_id TEXT NOT NULL,
+				correlation_id TEXT NOT NULL DEFAULT '',
+				event_data TEXT NOT NULL,
+				PRIMARY KEY (organization_id, processed_timestamp)
+			);`); err != nil {
+				return fmt.Errorf("failed to create events table: %w", err)
+			}
+
+			if _, err := s.db.Exec("PRAGMA user_version = 10"); err != nil {
+				return fmt.Errorf("failed to set schema version to 10: %w", err)
+			}
+			s.logger.Info("Schema migrated to version 10 (organization_states and events tables)")
+			version = 10
+		}
 	}
 
 	s.logger.Info("Database schema up to date", slog.Int("version", version))
 
 	return nil
+}
+
+// GetDB returns the underlying *sql.DB instance.
+// This is used by the eventhub package for event synchronization.
+func (s *SQLiteStorage) GetDB() *sql.DB {
+	return s.db
 }
 
 func isUniqueConstraintError(err error) bool {

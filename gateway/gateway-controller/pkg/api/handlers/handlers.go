@@ -45,6 +45,7 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/middleware"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/controlplane"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/lazyresourcexds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/metrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
@@ -93,8 +94,15 @@ func NewAPIServer(
 	validator config.Validator,
 	apiKeyXDSManager *apikeyxds.APIKeyStateManager,
 	systemConfig *config.Config,
+	eventHubInstance eventhub.EventHub,
+	enableMultiReplicaMode bool,
 ) *APIServer {
-	deploymentService := utils.NewAPIDeploymentService(store, db, snapshotManager, validator, &systemConfig.Router)
+	var deploymentService *utils.APIDeploymentService
+	if eventHubInstance != nil {
+		deploymentService = utils.NewAPIDeploymentServiceWithEventHub(store, db, snapshotManager, validator, &systemConfig.Router, eventHubInstance, enableMultiReplicaMode)
+	} else {
+		deploymentService = utils.NewAPIDeploymentService(store, db, snapshotManager, validator, &systemConfig.Router)
+	}
 	policyVersionResolver := utils.NewLoadedPolicyVersionResolver(policyDefinitions)
 	policyValidator := config.NewPolicyValidator(policyDefinitions)
 	server := &APIServer{

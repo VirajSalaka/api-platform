@@ -20,6 +20,7 @@ package handlers
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -376,6 +377,10 @@ func (m *MockStorage) DeleteCertificate(id string) error {
 		}
 	}
 	return errors.New("certificate not found")
+}
+
+func (m *MockStorage) GetDB() *sql.DB {
+	return nil
 }
 
 func (m *MockStorage) Close() error {

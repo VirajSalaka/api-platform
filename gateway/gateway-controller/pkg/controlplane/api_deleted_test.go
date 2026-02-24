@@ -19,6 +19,7 @@
 package controlplane
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -116,6 +117,10 @@ func (m *mockStorageForDeletion) GetConfigByHandle(handle string) (*models.Store
 		}
 	}
 	return nil, fmt.Errorf("config not found")
+}
+
+func (m *mockStorageForDeletion) GetDB() *sql.DB {
+	return nil
 }
 
 func (m *mockStorageForDeletion) Close() error {

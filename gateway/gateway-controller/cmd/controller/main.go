@@ -15,6 +15,8 @@ import (
 
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/adminserver"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/apikeyxds"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventlistener"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/lazyresourcexds"
 
 	"github.com/gin-gonic/gin"
@@ -308,6 +310,56 @@ func main() {
 	}
 	log.Info("Default llm provider templates loaded", slog.Int("count", len(templateDefinitions)))
 
+	// Initialize EventHub and EventListener for multi-replica sync (if enabled)
+	var eventHubInstance eventhub.EventHub
+	var evtListener *eventlistener.EventListener
+	if cfg.Controller.Server.EnableReplicaSync {
+		if !cfg.IsPersistentMode() {
+			log.Error("enable_replica_sync requires persistent storage mode (sqlite or postgres)")
+			os.Exit(1)
+		}
+
+		sqlDB := db.GetDB()
+		if sqlDB == nil {
+			log.Error("enable_replica_sync requires a SQL-backed storage with GetDB() support")
+			os.Exit(1)
+		}
+
+		log.Info("Initializing EventHub for multi-replica synchronization")
+		eventHubInstance = eventhub.New(sqlDB, log, eventhub.DefaultConfig())
+		if err := eventHubInstance.Initialize(); err != nil {
+			log.Error("Failed to initialize EventHub", slog.Any("error", err))
+			os.Exit(1)
+		}
+
+		// Register default organization
+		if err := eventHubInstance.RegisterOrganization("default"); err != nil {
+			log.Warn("Failed to register default organization (may already exist)", slog.Any("error", err))
+		}
+
+		// Create EventHub adapter and EventListener
+		eventSource := eventlistener.NewEventHubAdapter(eventHubInstance, log)
+		evtListener = eventlistener.NewEventListener(
+			eventSource,
+			configStore,
+			db,
+			snapshotManager,
+			policyManager,
+			&cfg.Router,
+			log,
+			cfg,
+			policyDefinitions,
+		)
+
+		// Start event listener
+		if err := evtListener.Start(context.Background()); err != nil {
+			log.Error("Failed to start event listener", slog.Any("error", err))
+			os.Exit(1)
+		}
+
+		log.Info("Multi-replica synchronization enabled")
+	}
+
 	// Create validator with policy validation support
 	validator := config.NewAPIValidator()
 	policyValidator := config.NewPolicyValidator(policyDefinitions)
@@ -348,7 +400,7 @@ func main() {
 
 	// Initialize API server with the configured validator and API key manager
 	apiServer := handlers.NewAPIServer(configStore, db, snapshotManager, policyManager, lazyResourceXDSManager, log, cpClient,
-		policyDefinitions, templateDefinitions, validator, apiKeyXDSManager, cfg)
+		policyDefinitions, templateDefinitions, validator, apiKeyXDSManager, cfg, eventHubInstance, cfg.Controller.Server.EnableReplicaSync)
 
 	// Ensure initial lazy resource snapshot includes default templates loaded from files.
 	// At this point, the API server initialization has already persisted/published OOB templates.
@@ -445,7 +497,12 @@ func main() {
 	ctx, cancel = context.WithTimeout(context.Background(), cfg.Controller.Server.ShutdownTimeout)
 	defer cancel()
 
-	// Stop control plane client first
+	// Stop event listener first (if enabled)
+	if evtListener != nil {
+		evtListener.Stop()
+	}
+
+	// Stop control plane client
 	cpClient.Stop()
 
 	if err := srv.Shutdown(ctx); err != nil {
@@ -453,6 +510,13 @@ func main() {
 	}
 
 	xdsServer.Stop()
+
+	// Stop EventHub (if enabled)
+	if eventHubInstance != nil {
+		if err := eventHubInstance.Close(); err != nil {
+			log.Error("Failed to close EventHub", slog.Any("error", err))
+		}
+	}
 
 	// Stop policy xDS server if it was started
 	if policyXDSServer != nil {

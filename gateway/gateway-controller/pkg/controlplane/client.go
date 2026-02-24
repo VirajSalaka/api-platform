@@ -145,6 +145,7 @@ func NewClient(
 		snapshotManager:   snapshotManager,
 		parser:            config.NewParser(),
 		validator:         validator,
+		// TODO: pass eventHub and enableMultiReplicaMode from caller when control plane supports multi-replica sync
 		deploymentService: utils.NewAPIDeploymentService(store, db, snapshotManager, validator, routerConfig),
 		apiKeyService:     utils.NewAPIKeyService(store, db, apiKeyXDSManager, apiKeyConfig),
 		apiKeyXDSManager:  apiKeyXDSManager,
