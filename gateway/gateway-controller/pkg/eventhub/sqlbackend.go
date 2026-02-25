@@ -87,9 +87,30 @@ func (b *SQLBackend) Initialize() error {
 	return nil
 }
 
+// closeStatements closes any non-nil prepared statements
+func (b *SQLBackend) closeStatements() {
+	stmts := []*sql.Stmt{
+		b.insertEventStmt,
+		b.updateOrgVersionStmt,
+		b.getOrgStateStmt,
+		b.getEventsStmt,
+		b.insertOrgStmt,
+		b.cleanupEventsStmt,
+	}
+	for _, stmt := range stmts {
+		if stmt != nil {
+			stmt.Close()
+		}
+	}
+}
+
 // prepareStatements prepares SQL statements for reuse
-func (b *SQLBackend) prepareStatements() error {
-	var err error
+func (b *SQLBackend) prepareStatements() (err error) {
+	defer func() {
+		if err != nil {
+			b.closeStatements()
+		}
+	}()
 
 	b.insertEventStmt, err = b.db.Prepare(`
 		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, event_type, action, entity_id, correlation_id, event_data)
@@ -450,20 +471,7 @@ func (b *SQLBackend) Close() error {
 	// Close prepared statements
 	b.stmtMu.Lock()
 	defer b.stmtMu.Unlock()
-
-	stmts := []*sql.Stmt{
-		b.insertEventStmt,
-		b.updateOrgVersionStmt,
-		b.getOrgStateStmt,
-		b.getEventsStmt,
-		b.insertOrgStmt,
-		b.cleanupEventsStmt,
-	}
-	for _, stmt := range stmts {
-		if stmt != nil {
-			stmt.Close()
-		}
-	}
+	b.closeStatements()
 
 	b.logger.Info("SQL event hub backend closed")
 	return nil
