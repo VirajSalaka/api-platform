@@ -52,16 +52,16 @@ type EventhubImpl interface {
 	Close() error
 }
 
-// SQLiteBackendConfig holds configuration for the SQLite backend
-type SQLiteBackendConfig struct {
+// SQLBackendConfig holds configuration for the SQL backend
+type SQLBackendConfig struct {
 	PollInterval    time.Duration
 	CleanupInterval time.Duration
 	RetentionPeriod time.Duration
 }
 
-// DefaultSQLiteBackendConfig returns a SQLiteBackendConfig with sensible defaults
-func DefaultSQLiteBackendConfig() SQLiteBackendConfig {
-	return SQLiteBackendConfig{
+// DefaultSQLBackendConfig returns a SQLBackendConfig with sensible defaults
+func DefaultSQLBackendConfig() SQLBackendConfig {
+	return SQLBackendConfig{
 		PollInterval:    2 * time.Second,
 		CleanupInterval: 5 * time.Minute,
 		RetentionPeriod: 1 * time.Hour,

@@ -32,12 +32,12 @@ type eventHub struct {
 
 // New creates a new EventHub backed by SQLite
 func New(db *sql.DB, logger *slog.Logger, config Config) EventHub {
-	backendConfig := SQLiteBackendConfig{
+	backendConfig := SQLBackendConfig{
 		PollInterval:    config.PollInterval,
 		CleanupInterval: config.CleanupInterval,
 		RetentionPeriod: config.RetentionPeriod,
 	}
-	backend := NewSQLiteBackend(db, logger, backendConfig)
+	backend := NewSQLBackend(db, logger, backendConfig)
 	return &eventHub{
 		backend: backend,
 		logger:  logger,

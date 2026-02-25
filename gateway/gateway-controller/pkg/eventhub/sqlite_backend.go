@@ -29,11 +29,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// SQLiteBackend implements EventhubImpl using SQLite polling
-type SQLiteBackend struct {
+// SQLBackend implements EventhubImpl using SQL polling
+type SQLBackend struct {
 	db     *sql.DB
 	logger *slog.Logger
-	config SQLiteBackendConfig
+	config SQLBackendConfig
 
 	registry *organizationRegistry
 
@@ -52,10 +52,10 @@ type SQLiteBackend struct {
 	wg     sync.WaitGroup
 }
 
-// NewSQLiteBackend creates a new SQLite-backed event hub
-func NewSQLiteBackend(db *sql.DB, logger *slog.Logger, config SQLiteBackendConfig) *SQLiteBackend {
+// NewSQLBackend creates a new SQL-backed event hub
+func NewSQLBackend(db *sql.DB, logger *slog.Logger, config SQLBackendConfig) *SQLBackend {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &SQLiteBackend{
+	return &SQLBackend{
 		db:       db,
 		logger:   logger,
 		config:   config,
@@ -66,7 +66,7 @@ func NewSQLiteBackend(db *sql.DB, logger *slog.Logger, config SQLiteBackendConfi
 }
 
 // Initialize prepares statements and starts background goroutines
-func (b *SQLiteBackend) Initialize() error {
+func (b *SQLBackend) Initialize() error {
 	if err := b.prepareStatements(); err != nil {
 		return fmt.Errorf("failed to prepare statements: %w", err)
 	}
@@ -79,7 +79,7 @@ func (b *SQLiteBackend) Initialize() error {
 	b.wg.Add(1)
 	go b.cleanupLoop()
 
-	b.logger.Info("SQLite event hub backend initialized",
+	b.logger.Info("SQL event hub backend initialized",
 		slog.Duration("poll_interval", b.config.PollInterval),
 		slog.Duration("cleanup_interval", b.config.CleanupInterval),
 		slog.Duration("retention_period", b.config.RetentionPeriod))
@@ -88,7 +88,7 @@ func (b *SQLiteBackend) Initialize() error {
 }
 
 // prepareStatements prepares SQL statements for reuse
-func (b *SQLiteBackend) prepareStatements() error {
+func (b *SQLBackend) prepareStatements() error {
 	var err error
 
 	b.insertEventStmt, err = b.db.Prepare(`
@@ -141,7 +141,7 @@ func (b *SQLiteBackend) prepareStatements() error {
 }
 
 // RegisterOrganization registers a new organization for event tracking
-func (b *SQLiteBackend) RegisterOrganization(orgID string) error {
+func (b *SQLBackend) RegisterOrganization(orgID string) error {
 	// Register in database
 	_, err := b.insertOrgStmt.Exec(orgID)
 	if err != nil {
@@ -158,7 +158,7 @@ func (b *SQLiteBackend) RegisterOrganization(orgID string) error {
 }
 
 // Publish publishes an event atomically (insert event + update org version)
-func (b *SQLiteBackend) Publish(orgID string, event Event) error {
+func (b *SQLBackend) Publish(orgID string, event Event) error {
 	newVersion := uuid.New().String()
 
 	tx, err := b.db.BeginTx(b.ctx, nil)
@@ -207,7 +207,7 @@ func (b *SQLiteBackend) Publish(orgID string, event Event) error {
 }
 
 // Subscribe subscribes to events for an organization
-func (b *SQLiteBackend) Subscribe(orgID string) (<-chan Event, error) {
+func (b *SQLBackend) Subscribe(orgID string) (<-chan Event, error) {
 	ch := make(chan Event, 100)
 
 	if err := b.registry.addSubscriber(orgID, ch); err != nil {
@@ -220,7 +220,7 @@ func (b *SQLiteBackend) Subscribe(orgID string) (<-chan Event, error) {
 }
 
 // Unsubscribe removes the subscription for an organization
-func (b *SQLiteBackend) Unsubscribe(orgID string) error {
+func (b *SQLBackend) Unsubscribe(orgID string) error {
 	org, err := b.registry.get(orgID)
 	if err != nil {
 		return err
@@ -239,7 +239,7 @@ func (b *SQLiteBackend) Unsubscribe(orgID string) error {
 }
 
 // pollLoop periodically checks for new events
-func (b *SQLiteBackend) pollLoop() {
+func (b *SQLBackend) pollLoop() {
 	defer b.wg.Done()
 
 	ticker := time.NewTicker(b.config.PollInterval)
@@ -256,7 +256,7 @@ func (b *SQLiteBackend) pollLoop() {
 }
 
 // pollOrganizations checks each registered organization for version changes
-func (b *SQLiteBackend) pollOrganizations() {
+func (b *SQLBackend) pollOrganizations() {
 	orgs := b.registry.getAll()
 	for _, org := range orgs {
 		if err := b.pollOrganization(org); err != nil {
@@ -268,7 +268,7 @@ func (b *SQLiteBackend) pollOrganizations() {
 }
 
 // pollOrganization checks a single organization for version changes
-func (b *SQLiteBackend) pollOrganization(org *organization) error {
+func (b *SQLBackend) pollOrganization(org *organization) error {
 	var state OrganizationState
 	err := b.getOrgStateStmt.QueryRow(org.id).Scan(&state.Organization, &state.VersionID, &state.UpdatedAt)
 	if err != nil {
@@ -363,7 +363,7 @@ func (b *SQLiteBackend) pollOrganization(org *organization) error {
 }
 
 // cleanupLoop periodically removes old events
-func (b *SQLiteBackend) cleanupLoop() {
+func (b *SQLBackend) cleanupLoop() {
 	defer b.wg.Done()
 
 	ticker := time.NewTicker(b.config.CleanupInterval)
@@ -382,7 +382,7 @@ func (b *SQLiteBackend) cleanupLoop() {
 }
 
 // Cleanup removes events older than the retention period
-func (b *SQLiteBackend) Cleanup(retentionPeriod time.Duration) error {
+func (b *SQLBackend) Cleanup(retentionPeriod time.Duration) error {
 	cutoff := time.Now().Add(-retentionPeriod)
 	result, err := b.cleanupEventsStmt.Exec(cutoff)
 	if err != nil {
@@ -397,7 +397,7 @@ func (b *SQLiteBackend) Cleanup(retentionPeriod time.Duration) error {
 }
 
 // CleanupRange removes events for an organization before a given time
-func (b *SQLiteBackend) CleanupRange(orgID string, before time.Time) error {
+func (b *SQLBackend) CleanupRange(orgID string, before time.Time) error {
 	_, err := b.db.Exec(
 		"DELETE FROM events WHERE organization_id = ? AND processed_timestamp < ?",
 		orgID, before,
@@ -409,7 +409,7 @@ func (b *SQLiteBackend) CleanupRange(orgID string, before time.Time) error {
 }
 
 // Close gracefully shuts down the backend
-func (b *SQLiteBackend) Close() error {
+func (b *SQLBackend) Close() error {
 	b.cancel()
 	b.wg.Wait()
 
@@ -441,6 +441,6 @@ func (b *SQLiteBackend) Close() error {
 		}
 	}
 
-	b.logger.Info("SQLite event hub backend closed")
+	b.logger.Info("SQL event hub backend closed")
 	return nil
 }
