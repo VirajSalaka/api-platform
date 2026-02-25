@@ -124,7 +124,7 @@ func (b *SQLBackend) prepareStatements() error {
 	}
 
 	b.insertOrgStmt, err = b.db.Prepare(`
-		INSERT OR IGNORE INTO organization_states (organization, version_id) VALUES (?, '')
+		INSERT INTO organization_states (organization, version_id) VALUES (?, '')
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert org statement: %w", err)
@@ -142,10 +142,34 @@ func (b *SQLBackend) prepareStatements() error {
 
 // RegisterOrganization registers a new organization for event tracking
 func (b *SQLBackend) RegisterOrganization(orgID string) error {
-	// Register in database
-	_, err := b.insertOrgStmt.Exec(orgID)
+	tx, err := b.db.BeginTx(b.ctx, nil)
 	if err != nil {
-		return fmt.Errorf("failed to register organization in database: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Check if organization already exists
+	var exists bool
+	err = tx.Stmt(b.getOrgStateStmt).QueryRow(orgID).Scan(new(string), new(string), new(time.Time))
+	if err == nil {
+		exists = true
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check organization existence: %w", err)
+	}
+
+	if !exists {
+		_, err = tx.Stmt(b.insertOrgStmt).Exec(orgID)
+		if err != nil {
+			return fmt.Errorf("failed to register organization in database: %w", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit organization registration: %w", err)
 	}
 
 	// Register in local registry (ignore already exists)
