@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, WSO2 LLC. (https://www.wso2.com).
+ * Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
  *
  * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
@@ -19,18 +19,6 @@
 package eventhub
 
 import "time"
-
-// BackendType represents the type of backend for the event hub
-type BackendType string
-
-const (
-	// BackendTypeSQLite uses SQLite for event storage and polling
-	BackendTypeSQLite BackendType = "sqlite"
-	// BackendTypeNATS uses NATS for event distribution (future)
-	BackendTypeNATS BackendType = "nats"
-	// BackendTypeAzureServiceBus uses Azure Service Bus (future)
-	BackendTypeAzureServiceBus BackendType = "azure-servicebus"
-)
 
 // EventhubImpl defines the backend interface for pluggable event hub implementations
 type EventhubImpl interface {
