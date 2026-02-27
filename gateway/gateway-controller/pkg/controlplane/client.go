@@ -147,7 +147,7 @@ func NewClient(
 		snapshotManager:   snapshotManager,
 		parser:            config.NewParser(),
 		validator:         validator,
-		deploymentService: utils.NewAPIDeploymentService(store, db, snapshotManager, validator, routerConfig, eventHub),
+		deploymentService: utils.NewAPIDeploymentService(store, db, validator, routerConfig, eventHub),
 		apiKeyService:     utils.NewAPIKeyService(store, db, apiKeyXDSManager, apiKeyConfig),
 		apiKeyXDSManager:  apiKeyXDSManager,
 		routerConfig:      routerConfig,

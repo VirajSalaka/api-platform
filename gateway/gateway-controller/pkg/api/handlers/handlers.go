@@ -96,7 +96,7 @@ func NewAPIServer(
 	systemConfig *config.Config,
 	eventHubInstance eventhub.EventHub,
 ) *APIServer {
-	deploymentService := utils.NewAPIDeploymentService(store, db, snapshotManager, validator, &systemConfig.Router, eventHubInstance)
+	deploymentService := utils.NewAPIDeploymentService(store, db, validator, &systemConfig.Router, eventHubInstance)
 	policyVersionResolver := utils.NewLoadedPolicyVersionResolver(policyDefinitions)
 	policyValidator := config.NewPolicyValidator(policyDefinitions)
 	server := &APIServer{
