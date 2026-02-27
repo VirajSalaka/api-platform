@@ -844,147 +844,46 @@ func (s *APIServer) DeleteAPI(c *gin.Context, id string) {
 
 	// Get correlation-aware logger from context
 	log := middleware.GetLogger(c, s.logger)
-
 	handle := id
-
-	if s.db == nil {
-		log.Error("Database storage not available")
-		metrics.APIOperationsTotal.WithLabelValues(operation, "error", "rest_api").Inc()
-		c.JSON(http.StatusServiceUnavailable, api.ErrorResponse{
-			Status:  "error",
-			Message: "Database storage not available",
-		})
-		return
+	if s.deploymentService == nil {
+		s.deploymentService = utils.NewAPIDeploymentService(s.store, s.db, s.validator, s.routerConfig, nil)
 	}
-
-	// Check if config exists
-	cfg, err := s.db.GetConfigByHandle(handle)
+	correlationID := middleware.GetCorrelationID(c)
+	result, err := s.deploymentService.DeleteAPIConfiguration(utils.APIDeletionParams{
+		Handle:           handle,
+		CorrelationID:    correlationID,
+		Logger:           log,
+		APIKeyXDSManager: s.apiKeyXDSManager,
+	})
 	if err != nil {
-		log.Warn("API configuration not found",
-			slog.String("handle", handle))
-		c.JSON(http.StatusNotFound, api.ErrorResponse{
-			Status:  "error",
-			Message: fmt.Sprintf("API configuration with handle '%s' not found", handle),
-		})
-		return
-	}
-
-	// Delete from database first (only if persistent mode)
-	if s.db != nil {
-		if err := s.db.DeleteConfig(cfg.ID); err != nil {
-			log.Error("Failed to delete config from database", slog.Any("error", err))
-			c.JSON(http.StatusInternalServerError, api.ErrorResponse{
+		if storage.IsDatabaseUnavailableError(err) {
+			log.Error("Database storage not available")
+			if metrics.APIOperationsTotal != nil {
+				metrics.APIOperationsTotal.WithLabelValues(operation, "error", "rest_api").Inc()
+			}
+			c.JSON(http.StatusServiceUnavailable, api.ErrorResponse{
 				Status:  "error",
-				Message: "Failed to delete configuration",
+				Message: "Database storage not available",
 			})
 			return
 		}
 
-		// Delete associated API keys from database
-		err := s.db.RemoveAPIKeysAPI(cfg.ID)
-		if err != nil {
-			log.Warn("Failed to remove API keys from database",
-				slog.String("handle", handle),
-				slog.Any("error", err))
+		if storage.IsNotFoundError(err) {
+			log.Warn("API configuration not found",
+				slog.String("handle", handle))
+			c.JSON(http.StatusNotFound, api.ErrorResponse{
+				Status:  "error",
+				Message: fmt.Sprintf("API configuration with handle '%s' not found", handle),
+			})
+			return
 		}
-	}
 
-	// Remove API keys from ConfigStore
-	if err := s.store.RemoveAPIKeysByAPI(cfg.ID); err != nil {
-		log.Warn("Failed to remove API keys from ConfigStore",
+		log.Error("Failed to delete API configuration",
 			slog.String("handle", handle),
 			slog.Any("error", err))
-	}
-
-	// Remove API keys from policy engine via xDS
-	if s.apiKeyXDSManager != nil {
-		// Extract API name and version from the config
-		apiConfig, err := cfg.Configuration.Spec.AsAPIConfigData()
-		if err == nil {
-			apiId := cfg.ID
-			apiName := apiConfig.DisplayName
-			apiVersion := apiConfig.Version
-			correlationID := middleware.GetCorrelationID(c)
-
-			if err := s.apiKeyXDSManager.RemoveAPIKeysByAPI(apiId, apiName, apiVersion, correlationID); err != nil {
-				log.Warn("Failed to remove API keys from policy engine",
-					slog.String("api_id", apiId),
-					slog.String("handle", handle),
-					slog.String("api_name", apiName),
-					slog.String("api_version", apiVersion),
-					slog.String("correlation_id", correlationID),
-					slog.Any("error", err))
-			} else {
-				log.Info("Successfully removed API keys from policy engine",
-					slog.String("api_id", apiId),
-					slog.String("handle", handle),
-					slog.String("api_name", apiName),
-					slog.String("api_version", apiVersion),
-					slog.String("correlation_id", correlationID))
-			}
-		} else {
-			log.Warn("Failed to extract API config data for API key removal",
-				slog.String("handle", handle),
-				slog.Any("error", err))
+		if metrics.APIOperationsTotal != nil {
+			metrics.APIOperationsTotal.WithLabelValues(operation, "error", "rest_api").Inc()
 		}
-	}
-
-	if cfg.Configuration.Kind == api.WebSubApi {
-		topicsToUnregister := s.deploymentService.GetTopicsForDelete(*cfg)
-
-		var deregErrs int32
-		var wg sync.WaitGroup
-
-		if len(topicsToUnregister) > 0 {
-			wg.Add(1)
-			go func(list []string) {
-				defer wg.Done()
-				log.Info("Starting topic deregistration", slog.Int("total_topics", len(list)), slog.String("api_id", cfg.ID))
-				var childWg sync.WaitGroup
-				for _, topic := range list {
-					childWg.Add(1)
-					go func(topic string) {
-						defer childWg.Done()
-						ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.routerConfig.EventGateway.TimeoutSeconds)*time.Second)
-						defer cancel()
-						if err := s.deploymentService.UnregisterTopicWithHub(ctx, s.httpClient, topic, s.routerConfig.EventGateway.RouterHost, s.routerConfig.EventGateway.WebSubHubListenerPort, log); err != nil {
-							log.Error("Failed to deregister topic from WebSubHub",
-								slog.Any("error", err),
-								slog.String("topic", topic),
-								slog.String("api_id", cfg.ID))
-							atomic.AddInt32(&deregErrs, 1)
-						} else {
-							log.Info("Successfully deregistered topic from WebSubHub",
-								slog.String("topic", topic),
-								slog.String("api_id", cfg.ID))
-						}
-					}(topic)
-				}
-				childWg.Wait()
-			}(topicsToUnregister)
-		}
-
-		wg.Wait()
-
-		log.Info("Topic lifecycle operations completed",
-			slog.String("api_id", cfg.ID),
-			slog.Int("deregistered", len(topicsToUnregister)),
-			slog.Int("deregister_errors", int(deregErrs)))
-
-		// Check if topic operations failed and return error
-		if deregErrs > 0 {
-			log.Error("Failed to register & deregister topics", slog.Any("error", err))
-			c.JSON(http.StatusInternalServerError, api.ErrorResponse{
-				Status:  "error",
-				Message: "Topic lifecycle operations failed",
-			})
-			return
-		}
-	}
-
-	// Delete from in-memory store
-	if err := s.store.Delete(cfg.ID); err != nil {
-		log.Error("Failed to delete config from memory store", slog.Any("error", err))
 		c.JSON(http.StatusInternalServerError, api.ErrorResponse{
 			Status:  "error",
 			Message: "Failed to delete configuration",
@@ -992,43 +891,26 @@ func (s *APIServer) DeleteAPI(c *gin.Context, id string) {
 		return
 	}
 
-	// Get correlation ID from context
-	correlationID := middleware.GetCorrelationID(c)
-
-	// Update xDS snapshot asynchronously
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := s.snapshotManager.UpdateSnapshot(ctx, correlationID); err != nil {
-			log.Error("Failed to update xDS snapshot", slog.Any("error", err))
-		}
-	}()
-
 	log.Info("API configuration deleted",
-		slog.String("id", cfg.ID),
+		slog.String("id", result.StoredConfig.ID),
 		slog.String("handle", handle))
 
 	// Record successful operation metrics
-	metrics.APIOperationsTotal.WithLabelValues(operation, "success", "rest_api").Inc()
-	metrics.APIOperationDurationSeconds.WithLabelValues(operation, "rest_api").Observe(time.Since(startTime).Seconds())
-	metrics.APIsTotal.WithLabelValues("rest_api", "active").Dec()
+	if metrics.APIOperationsTotal != nil {
+		metrics.APIOperationsTotal.WithLabelValues(operation, "success", "rest_api").Inc()
+	}
+	if metrics.APIOperationDurationSeconds != nil {
+		metrics.APIOperationDurationSeconds.WithLabelValues(operation, "rest_api").Observe(time.Since(startTime).Seconds())
+	}
+	if metrics.APIsTotal != nil {
+		metrics.APIsTotal.WithLabelValues("rest_api", "active").Dec()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "success",
 		"message": "API configuration deleted successfully",
 		"id":      handle,
 	})
-
-	// Remove derived policy configuration
-	if s.policyManager != nil {
-		policyID := cfg.ID + "-policies"
-		if err := s.policyManager.RemovePolicy(policyID); err != nil {
-			log.Warn("Failed to remove derived policy configuration", slog.Any("error", err), slog.String("policy_id", policyID))
-		} else {
-			log.Info("Derived policy configuration removed", slog.String("policy_id", policyID))
-		}
-	}
 }
 
 // CreateLLMProviderTemplate implements ServerInterface.CreateLLMProviderTemplate

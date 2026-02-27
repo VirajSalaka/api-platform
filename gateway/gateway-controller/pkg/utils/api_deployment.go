@@ -52,6 +52,19 @@ type APIDeploymentResult struct {
 	IsUpdate     bool
 }
 
+// APIDeletionParams contains parameters for API deletion operations
+type APIDeletionParams struct {
+	Handle           string // API handle (metadata.name)
+	CorrelationID    string // Correlation ID for tracking
+	Logger           *slog.Logger
+	APIKeyXDSManager XDSManager
+}
+
+// APIDeletionResult contains the result of API deletion
+type APIDeletionResult struct {
+	StoredConfig *models.StoredConfig
+}
+
 // ValidationErrorListError wraps validation errors for API configuration.
 // This allows callers to return structured validation errors in API responses.
 type ValidationErrorListError struct {
@@ -349,6 +362,135 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 		StoredConfig: storedCfg,
 		IsUpdate:     isUpdate,
 	}, nil
+}
+
+// DeleteAPIConfiguration handles API deletion in the write path.
+// The in-memory config store is intentionally not updated here; replica sync is eventhub-driven.
+func (s *APIDeploymentService) DeleteAPIConfiguration(params APIDeletionParams) (*APIDeletionResult, error) {
+	logger := params.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	if s.db == nil {
+		return nil, fmt.Errorf("%w: cannot delete config without database", storage.ErrDatabaseUnavailable)
+	}
+
+	cfg, err := s.db.GetConfigByHandle(params.Handle)
+	if err != nil {
+		if storage.IsNotFoundError(err) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, fmt.Errorf("%w: handle=%s", storage.ErrNotFound, params.Handle)
+		}
+		return nil, err
+	}
+
+	if err := s.db.DeleteConfig(cfg.ID); err != nil {
+		return nil, fmt.Errorf("failed to delete config from database: %w", err)
+	}
+
+	// Remove associated API keys from database (best effort)
+	if err := s.db.RemoveAPIKeysAPI(cfg.ID); err != nil {
+		logger.Warn("Failed to remove API keys from database",
+			slog.String("handle", params.Handle),
+			slog.Any("error", err))
+	}
+
+	// Remove API keys from policy engine xDS state (best effort)
+	if params.APIKeyXDSManager != nil && cfg.Configuration.Kind == api.RestApi {
+		apiConfig, err := cfg.Configuration.Spec.AsAPIConfigData()
+		if err != nil {
+			logger.Warn("Failed to extract API config data for API key removal",
+				slog.String("handle", params.Handle),
+				slog.Any("error", err))
+		} else if err := params.APIKeyXDSManager.RemoveAPIKeysByAPI(cfg.ID, apiConfig.DisplayName, apiConfig.Version, params.CorrelationID); err != nil {
+			logger.Warn("Failed to remove API keys from policy engine",
+				slog.String("api_id", cfg.ID),
+				slog.String("handle", params.Handle),
+				slog.String("api_name", apiConfig.DisplayName),
+				slog.String("api_version", apiConfig.Version),
+				slog.String("correlation_id", params.CorrelationID),
+				slog.Any("error", err))
+		} else {
+			logger.Info("Successfully removed API keys from policy engine",
+				slog.String("api_id", cfg.ID),
+				slog.String("handle", params.Handle),
+				slog.String("api_name", apiConfig.DisplayName),
+				slog.String("api_version", apiConfig.Version),
+				slog.String("correlation_id", params.CorrelationID))
+		}
+	}
+
+	var deletionErr error
+	if cfg.Configuration.Kind == api.WebSubApi {
+		deletionErr = s.deregisterWebSubTopicsOnDelete(cfg, logger)
+	}
+
+	// Publish deletion event so all replicas (including self) converge through event listener sync.
+	s.publishEvent(eventhub.EventTypeAPI, "DELETE", cfg.ID, params.CorrelationID, logger)
+
+	if deletionErr != nil {
+		return nil, deletionErr
+	}
+
+	return &APIDeletionResult{StoredConfig: cfg}, nil
+}
+
+func (s *APIDeploymentService) deregisterWebSubTopicsOnDelete(cfg *models.StoredConfig, logger *slog.Logger) error {
+	if s.routerConfig == nil {
+		return fmt.Errorf("router configuration is required to deregister WebSub topics")
+	}
+
+	topicsToUnregister := s.GetTopicsForDelete(*cfg)
+	if len(topicsToUnregister) == 0 {
+		return nil
+	}
+
+	var deregErrs int32
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func(list []string) {
+		defer wg.Done()
+		logger.Info("Starting topic deregistration",
+			slog.Int("total_topics", len(list)),
+			slog.String("api_id", cfg.ID))
+
+		var childWg sync.WaitGroup
+		for _, topic := range list {
+			childWg.Add(1)
+			go func(topic string) {
+				defer childWg.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), time.Duration(s.routerConfig.EventGateway.TimeoutSeconds)*time.Second)
+				defer cancel()
+
+				if err := s.UnregisterTopicWithHub(ctx, s.httpClient, topic, s.routerConfig.EventGateway.RouterHost, s.routerConfig.EventGateway.WebSubHubListenerPort, logger); err != nil {
+					logger.Error("Failed to deregister topic from WebSubHub",
+						slog.Any("error", err),
+						slog.String("topic", topic),
+						slog.String("api_id", cfg.ID))
+					atomic.AddInt32(&deregErrs, 1)
+					return
+				}
+				logger.Info("Successfully deregistered topic from WebSubHub",
+					slog.String("topic", topic),
+					slog.String("api_id", cfg.ID))
+			}(topic)
+		}
+		childWg.Wait()
+	}(topicsToUnregister)
+
+	wg.Wait()
+
+	logger.Info("Topic lifecycle operations completed",
+		slog.String("api_id", cfg.ID),
+		slog.Int("deregistered", len(topicsToUnregister)),
+		slog.Int("deregister_errors", int(deregErrs)))
+
+	if deregErrs > 0 {
+		return fmt.Errorf("failed to complete topic operations: %d deregistration error(s)", deregErrs)
+	}
+
+	return nil
 }
 
 func (s *APIDeploymentService) GetTopicsForUpdate(apiConfig models.StoredConfig) ([]string, []string) {

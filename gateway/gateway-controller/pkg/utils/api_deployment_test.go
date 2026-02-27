@@ -27,6 +27,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,6 +35,7 @@ import (
 	"github.com/stretchr/testify/require"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/metrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
@@ -58,6 +60,32 @@ func setupSQLiteDBForAPIDeploymentTests(t *testing.T) storage.Storage {
 
 	return db
 }
+
+type mockEventHub struct {
+	mu     sync.Mutex
+	events []eventhub.Event
+}
+
+func (m *mockEventHub) Initialize() error { return nil }
+
+func (m *mockEventHub) RegisterOrganization(orgID string) error { return nil }
+
+func (m *mockEventHub) PublishEvent(orgID string, event eventhub.Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, event)
+	return nil
+}
+
+func (m *mockEventHub) Subscribe(orgID string) (<-chan eventhub.Event, error) {
+	ch := make(chan eventhub.Event)
+	close(ch)
+	return ch, nil
+}
+
+func (m *mockEventHub) CleanUpEvents() error { return nil }
+
+func (m *mockEventHub) Close() error { return nil }
 
 func TestNewAPIDeploymentService(t *testing.T) {
 	store := storage.NewConfigStore()
@@ -522,6 +550,87 @@ func TestAPIDeploymentService_Fields(t *testing.T) {
 	assert.Nil(t, service.db)
 	assert.NotNil(t, service.parser)
 	assert.NotNil(t, service.httpClient)
+}
+
+func TestDeleteAPIConfiguration_NoDatabase(t *testing.T) {
+	store := storage.NewConfigStore()
+	service := NewAPIDeploymentService(store, nil, nil, nil, nil)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	result, err := service.DeleteAPIConfiguration(APIDeletionParams{
+		Handle:        "test-handle",
+		CorrelationID: "corr-1",
+		Logger:        logger,
+	})
+
+	assert.Nil(t, result)
+	require.Error(t, err)
+	assert.True(t, storage.IsDatabaseUnavailableError(err))
+}
+
+func TestDeleteAPIConfiguration_PublishesEventWithoutMutatingMemoryStore(t *testing.T) {
+	store := storage.NewConfigStore()
+	db := setupSQLiteDBForAPIDeploymentTests(t)
+	hub := &mockEventHub{}
+	service := NewAPIDeploymentService(store, db, nil, nil, hub)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var spec api.APIConfiguration_Spec
+	spec.FromAPIConfigData(api.APIConfigData{
+		DisplayName: "Delete Test API",
+		Version:     "v1",
+		Context:     "/delete-test",
+	})
+
+	cfg := &models.StoredConfig{
+		ID: "delete-test-id",
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Metadata: api.Metadata{
+				Name: "delete-test-handle",
+			},
+			Spec: spec,
+		},
+		SourceConfiguration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Metadata: api.Metadata{
+				Name: "delete-test-handle",
+			},
+			Spec: spec,
+		},
+		Status:          models.StatusPending,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+		DeployedAt:      nil,
+		DeployedVersion: 0,
+	}
+
+	require.NoError(t, db.SaveConfig(cfg))
+	require.NoError(t, store.Add(cfg))
+
+	result, err := service.DeleteAPIConfiguration(APIDeletionParams{
+		Handle:        "delete-test-handle",
+		CorrelationID: "corr-delete",
+		Logger:        logger,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, cfg.ID, result.StoredConfig.ID)
+
+	// DB must be deleted in the write path.
+	_, err = db.GetConfig(cfg.ID)
+	require.Error(t, err)
+	assert.True(t, storage.IsNotFoundError(err))
+
+	// In-memory ConfigStore must remain unchanged until event listener sync.
+	_, err = store.Get(cfg.ID)
+	require.NoError(t, err)
+
+	require.Len(t, hub.events, 1)
+	assert.Equal(t, eventhub.EventTypeAPI, hub.events[0].EventType)
+	assert.Equal(t, "DELETE", hub.events[0].Action)
+	assert.Equal(t, cfg.ID, hub.events[0].EntityID)
+	assert.Equal(t, "corr-delete", hub.events[0].CorrelationID)
 }
 
 // Tests for lines 100-111: WebSub API parsing error path
