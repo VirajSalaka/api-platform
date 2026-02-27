@@ -24,13 +24,14 @@ import (
 	"time"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	policybuilder "github.com/wso2/api-platform/gateway/gateway-controller/pkg/policy"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 )
 
 // processAPIEvent dispatches API events by action
-func (l *EventListener) processAPIEvent(event Event) {
+func (l *EventListener) processAPIEvent(event eventhub.Event) {
 	switch event.Action {
 	case "CREATE", "UPDATE":
 		l.handleAPICreateOrUpdate(event)
@@ -44,7 +45,7 @@ func (l *EventListener) processAPIEvent(event Event) {
 }
 
 // handleAPICreateOrUpdate handles API create or update events from other replicas
-func (l *EventListener) handleAPICreateOrUpdate(event Event) {
+func (l *EventListener) handleAPICreateOrUpdate(event eventhub.Event) {
 	entityID := event.EntityID
 
 	l.logger.Info("Processing API create/update event from another replica",
@@ -89,6 +90,7 @@ func (l *EventListener) handleAPICreateOrUpdate(event Event) {
 
 	// Update xDS snapshot
 	go func() {
+		// TODO: (VirajSalaka) Context Timeout
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -99,6 +101,8 @@ func (l *EventListener) handleAPICreateOrUpdate(event Event) {
 		}
 	}()
 
+	// TODO: (VirajSalaka) Introduce an error group and have a proper rollback mechanism.
+
 	// Update policies
 	l.updatePoliciesForAPI(storedConfig, event.CorrelationID)
 
@@ -108,7 +112,7 @@ func (l *EventListener) handleAPICreateOrUpdate(event Event) {
 }
 
 // handleAPIDelete handles API delete events from other replicas
-func (l *EventListener) handleAPIDelete(event Event) {
+func (l *EventListener) handleAPIDelete(event eventhub.Event) {
 	entityID := event.EntityID
 
 	l.logger.Info("Processing API delete event from another replica",

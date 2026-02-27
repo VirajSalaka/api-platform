@@ -332,10 +332,9 @@ func main() {
 			log.Warn("Failed to register default organization (may already exist)", slog.Any("error", err))
 		}
 
-		// Create EventHub adapter and EventListener
-		eventSource := eventlistener.NewEventHubAdapter(eventHubInstance, log)
+		// Create EventListener
 		evtListener = eventlistener.NewEventListener(
-			eventSource,
+			eventHubInstance,
 			configStore,
 			db,
 			snapshotManager,
@@ -347,7 +346,7 @@ func main() {
 		)
 
 		// Start event listener
-		if err := evtListener.Start(context.Background()); err != nil {
+		if err := evtListener.Start(); err != nil {
 			log.Error("Failed to start event listener", slog.Any("error", err))
 			os.Exit(1)
 		}

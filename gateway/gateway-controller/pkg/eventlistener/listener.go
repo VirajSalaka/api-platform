@@ -24,15 +24,16 @@ import (
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/xds"
 )
 
-// EventListener listens for events from an EventSource and processes them
+// EventListener listens for events from EventHub and processes them
 // to keep the local replica synchronized with other replicas.
 type EventListener struct {
-	eventSource       EventSource
+	eventHub          eventhub.EventHub
 	store             *storage.ConfigStore
 	db                storage.Storage
 	snapshotManager   *xds.SnapshotManager
@@ -42,14 +43,14 @@ type EventListener struct {
 	systemConfig      *config.Config
 	policyDefinitions map[string]api.PolicyDefinition
 
-	eventCh chan Event
+	eventCh <-chan eventhub.Event
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
 
 // NewEventListener creates a new EventListener
 func NewEventListener(
-	eventSource EventSource,
+	eventHub eventhub.EventHub,
 	store *storage.ConfigStore,
 	db storage.Storage,
 	snapshotManager *xds.SnapshotManager,
@@ -61,7 +62,7 @@ func NewEventListener(
 ) *EventListener {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &EventListener{
-		eventSource:       eventSource,
+		eventHub:          eventHub,
 		store:             store,
 		db:                db,
 		snapshotManager:   snapshotManager,
@@ -70,18 +71,19 @@ func NewEventListener(
 		logger:            logger,
 		systemConfig:      systemConfig,
 		policyDefinitions: policyDefinitions,
-		eventCh:           make(chan Event, 100),
 		ctx:               ctx,
 		cancel:            cancel,
 	}
 }
 
 // Start begins listening for events
-func (l *EventListener) Start(ctx context.Context) error {
+func (l *EventListener) Start() error {
 	// Subscribe to "default" organization events
-	if err := l.eventSource.Subscribe(ctx, "default", l.eventCh); err != nil {
+	ch, err := l.eventHub.Subscribe("default")
+	if err != nil {
 		return err
 	}
+	l.eventCh = ch
 
 	// Start processing goroutine
 	go l.processEvents()
@@ -93,13 +95,10 @@ func (l *EventListener) Start(ctx context.Context) error {
 // Stop gracefully stops the event listener
 func (l *EventListener) Stop() {
 	l.cancel()
-	if err := l.eventSource.Close(); err != nil {
-		l.logger.Warn("Error closing event source", slog.Any("error", err))
-	}
 	l.logger.Info("Event listener stopped")
 }
 
-// processEvents handles incoming events from the event source
+// processEvents handles incoming events from the EventHub subscription
 func (l *EventListener) processEvents() {
 	for {
 		select {
@@ -116,25 +115,25 @@ func (l *EventListener) processEvents() {
 }
 
 // handleEvent dispatches events to the appropriate handler by event type
-func (l *EventListener) handleEvent(event Event) {
+func (l *EventListener) handleEvent(event eventhub.Event) {
 	l.logger.Info("Processing replica sync event",
-		slog.String("event_type", event.EventType),
+		slog.String("event_type", string(event.EventType)),
 		slog.String("action", event.Action),
 		slog.String("entity_id", event.EntityID),
 		slog.String("correlation_id", event.CorrelationID))
 
 	switch event.EventType {
-	case "API":
+	case eventhub.EventTypeAPI:
 		l.processAPIEvent(event)
-	case "CERTIFICATE":
+	case eventhub.EventTypeCertificate:
 		l.logger.Info("Certificate event received (processing not yet implemented)",
 			slog.String("entity_id", event.EntityID))
-	case "LLM_TEMPLATE":
+	case eventhub.EventTypeLLMTemplate:
 		l.logger.Info("LLM template event received (processing not yet implemented)",
 			slog.String("entity_id", event.EntityID))
 	default:
 		l.logger.Warn("Unknown event type received",
-			slog.String("event_type", event.EventType),
+			slog.String("event_type", string(event.EventType)),
 			slog.String("entity_id", event.EntityID))
 	}
 }
