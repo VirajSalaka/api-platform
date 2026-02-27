@@ -21,6 +21,7 @@ package eventlistener
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
@@ -109,9 +110,27 @@ func (l *EventListener) processEvents() {
 				l.logger.Info("Event channel closed, stopping event processing")
 				return
 			}
-			l.handleEvent(event)
+			l.processEventSafely(event)
 		}
 	}
+}
+
+// processEventSafely processes a single event and recovers from panics so
+// the listener loop can continue processing subsequent events.
+func (l *EventListener) processEventSafely(event eventhub.Event) {
+	defer func() {
+		if p := recover(); p != nil {
+			l.logger.Error("Recovered from panic while processing event",
+				slog.String("event_type", string(event.EventType)),
+				slog.String("action", event.Action),
+				slog.String("entity_id", event.EntityID),
+				slog.String("correlation_id", event.CorrelationID),
+				slog.Any("panic", p),
+				slog.String("stack_trace", string(debug.Stack())))
+		}
+	}()
+
+	l.handleEvent(event)
 }
 
 // handleEvent dispatches events to the appropriate handler by event type
