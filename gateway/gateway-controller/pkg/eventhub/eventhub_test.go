@@ -20,6 +20,7 @@ package eventhub
 
 import (
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
@@ -106,11 +107,11 @@ func TestPublishAndSubscribe(t *testing.T) {
 	event := Event{
 		OrganizationID:      "test-org",
 		OriginatedTimestamp: time.Now(),
-		EventType:          EventTypeAPI,
-		Action:             "CREATE",
-		EntityID:           "api-123",
-		CorrelationID:      "corr-456",
-		EventData:          `{"name":"test-api"}`,
+		EventType:           EventTypeAPI,
+		Action:              "CREATE",
+		EntityID:            "api-123",
+		CorrelationID:       "corr-456",
+		EventData:           `{"name":"test-api"}`,
 	}
 	require.NoError(t, hub.PublishEvent("test-org", event))
 
@@ -167,10 +168,10 @@ func TestAtomicPublish(t *testing.T) {
 	// Publish event
 	event := Event{
 		OriginatedTimestamp: time.Now(),
-		EventType:          EventTypeAPI,
-		Action:             "CREATE",
-		EntityID:           "api-1",
-		EventData:          `{"test":"data"}`,
+		EventType:           EventTypeAPI,
+		Action:              "CREATE",
+		EntityID:            "api-1",
+		EventData:           `{"test":"data"}`,
 	}
 	require.NoError(t, hub.PublishEvent("test-org", event))
 
@@ -210,10 +211,10 @@ func TestMultipleSubscribers(t *testing.T) {
 	// Publish event
 	event := Event{
 		OriginatedTimestamp: time.Now(),
-		EventType:          EventTypeAPI,
-		Action:             "UPDATE",
-		EntityID:           "api-multi",
-		EventData:          `{}`,
+		EventType:           EventTypeAPI,
+		Action:              "UPDATE",
+		EntityID:            "api-multi",
+		EventData:           `{}`,
 	}
 	require.NoError(t, hub.PublishEvent("test-org", event))
 
@@ -288,4 +289,148 @@ func TestMultipleEventTypes(t *testing.T) {
 	}
 
 	assert.Len(t, received, 3)
+}
+
+func TestPollOrganizationsKeysetPagination(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	backendConfig := DefaultSQLBackendConfig()
+	backendConfig.OrganizationStatePageSize = 50
+	backend := NewSQLBackend(db, logger, backendConfig)
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	const orgCount = 210
+	subscribers := make(map[string]<-chan Event, orgCount)
+
+	for i := 0; i < orgCount; i++ {
+		orgID := fmt.Sprintf("org-%03d", i)
+		require.NoError(t, backend.RegisterOrganization(orgID))
+
+		ch, err := backend.Subscribe(orgID)
+		require.NoError(t, err)
+		subscribers[orgID] = ch
+
+		event := Event{
+			OriginatedTimestamp: time.Now(),
+			EventType:           EventTypeAPI,
+			Action:              "CREATE",
+			EntityID:            fmt.Sprintf("entity-%03d", i),
+			EventData:           "{}",
+		}
+		require.NoError(t, backend.Publish(orgID, event))
+	}
+
+	backend.pollOrganizations()
+
+	for orgID, ch := range subscribers {
+		select {
+		case evt := <-ch:
+			assert.Equal(t, orgID, evt.OrganizationID)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for event for %s", orgID)
+		}
+	}
+}
+
+func TestPollOrganizationWithStateFirstPollUsesSkewWindow(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	backend := NewSQLBackend(db, logger, DefaultSQLBackendConfig())
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	require.NoError(t, backend.RegisterOrganization("test-org"))
+	ch, err := backend.Subscribe("test-org")
+	require.NoError(t, err)
+
+	now := time.Now()
+	oldTs := now.Add(-2 * time.Minute)
+	recentTs := now.Add(-15 * time.Second)
+	_, err = db.Exec(`
+		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, event_type, action, entity_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)
+	`,
+		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "{}",
+		"test-org", recentTs, recentTs, "API", "CREATE", "recent-entity", "{}",
+	)
+	require.NoError(t, err)
+
+	org, err := backend.registry.get("test-org")
+	require.NoError(t, err)
+
+	state := OrganizationState{
+		Organization: "test-org",
+		VersionID:    "v1",
+	}
+	require.NoError(t, backend.pollOrganizationWithState(org, state))
+
+	select {
+	case evt := <-ch:
+		assert.Equal(t, "recent-entity", evt.EntityID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for recent event")
+	}
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected additional event delivered: %s", evt.EntityID)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestPollOrganizationWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	backend := NewSQLBackend(db, logger, DefaultSQLBackendConfig())
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	require.NoError(t, backend.RegisterOrganization("test-org"))
+	ch, err := backend.Subscribe("test-org")
+	require.NoError(t, err)
+
+	now := time.Now()
+	oldTs := now.Add(-2 * time.Minute)
+	recentTs := now.Add(-10 * time.Second)
+	_, err = db.Exec(`
+		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, event_type, action, entity_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)
+	`,
+		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "{}",
+		"test-org", recentTs, recentTs, "API", "CREATE", "recent-entity", "{}",
+	)
+	require.NoError(t, err)
+
+	org, err := backend.registry.get("test-org")
+	require.NoError(t, err)
+	org.lastPolled = now.Add(-30 * time.Second).Unix()
+
+	state := OrganizationState{
+		Organization: "test-org",
+		VersionID:    "v2",
+	}
+	require.NoError(t, backend.pollOrganizationWithState(org, state))
+
+	select {
+	case evt := <-ch:
+		assert.Equal(t, "recent-entity", evt.EntityID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for recent event")
+	}
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected additional event delivered: %s", evt.EntityID)
+	case <-time.After(150 * time.Millisecond):
+	}
 }

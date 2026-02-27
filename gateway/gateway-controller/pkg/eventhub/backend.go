@@ -20,6 +20,8 @@ package eventhub
 
 import "time"
 
+const defaultOrganizationStatePageSize = 200
+
 // EventhubImpl defines the backend interface for pluggable event hub implementations
 type EventhubImpl interface {
 	// Initialize sets up the backend
@@ -42,16 +44,18 @@ type EventhubImpl interface {
 
 // SQLBackendConfig holds configuration for the SQL backend
 type SQLBackendConfig struct {
-	PollInterval    time.Duration
-	CleanupInterval time.Duration
-	RetentionPeriod time.Duration
+	PollInterval              time.Duration
+	CleanupInterval           time.Duration
+	RetentionPeriod           time.Duration
+	OrganizationStatePageSize int
 }
 
 // DefaultSQLBackendConfig returns a SQLBackendConfig with sensible defaults
 func DefaultSQLBackendConfig() SQLBackendConfig {
 	return SQLBackendConfig{
-		PollInterval:    2 * time.Second,
-		CleanupInterval: 5 * time.Minute,
-		RetentionPeriod: 1 * time.Hour,
+		PollInterval:              2 * time.Second,
+		CleanupInterval:           5 * time.Minute,
+		RetentionPeriod:           1 * time.Hour,
+		OrganizationStatePageSize: defaultOrganizationStatePageSize,
 	}
 }

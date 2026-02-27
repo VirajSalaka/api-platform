@@ -29,6 +29,15 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	// initialPollSkewWindow limits first-time replay to a recent window instead of full history.
+	initialPollSkewWindow = 120 * time.Second
+	// Thresholds used to infer unix timestamp units (seconds/millis/micros/nanos).
+	unixMillisThreshold = int64(100_000_000_000)
+	unixMicrosThreshold = int64(100_000_000_000_000)
+	unixNanosThreshold  = int64(100_000_000_000_000_000)
+)
+
 // SQLBackend implements EventhubImpl using SQL polling
 type SQLBackend struct {
 	db     *sql.DB
@@ -38,18 +47,34 @@ type SQLBackend struct {
 	registry *organizationRegistry
 
 	// Prepared statements
-	stmtMu              sync.RWMutex
-	insertEventStmt     *sql.Stmt
+	stmtMu               sync.RWMutex
+	insertEventStmt      *sql.Stmt
 	updateOrgVersionStmt *sql.Stmt
-	getOrgStateStmt     *sql.Stmt
-	getEventsStmt       *sql.Stmt
-	insertOrgStmt       *sql.Stmt
-	cleanupEventsStmt   *sql.Stmt
+	getOrgStateStmt      *sql.Stmt
+	getOrgStatesPageStmt *sql.Stmt
+	getEventsStmt        *sql.Stmt
+	insertOrgStmt        *sql.Stmt
+	cleanupEventsStmt    *sql.Stmt
 
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+}
+
+// unixTimestampToTime converts unix timestamps in seconds, milliseconds,
+// microseconds, or nanoseconds to time.Time.
+func unixTimestampToTime(ts int64) time.Time {
+	switch {
+	case ts >= unixNanosThreshold:
+		return time.Unix(0, ts)
+	case ts >= unixMicrosThreshold:
+		return time.UnixMicro(ts)
+	case ts >= unixMillisThreshold:
+		return time.UnixMilli(ts)
+	default:
+		return time.Unix(ts, 0)
+	}
 }
 
 // NewSQLBackend creates a new SQL-backed event hub
@@ -93,6 +118,7 @@ func (b *SQLBackend) closeStatements() {
 		b.insertEventStmt,
 		b.updateOrgVersionStmt,
 		b.getOrgStateStmt,
+		b.getOrgStatesPageStmt,
 		b.getEventsStmt,
 		b.insertOrgStmt,
 		b.cleanupEventsStmt,
@@ -132,6 +158,17 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to prepare get org state statement: %w", err)
+	}
+
+	b.getOrgStatesPageStmt, err = b.db.Prepare(`
+		SELECT organization, version_id, updated_at
+		FROM organization_states
+		WHERE organization > ?
+		ORDER BY organization ASC
+		LIMIT ?
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to prepare get org states page statement: %w", err)
 	}
 
 	b.getEventsStmt, err = b.db.Prepare(`
@@ -286,27 +323,82 @@ func (b *SQLBackend) pollLoop() {
 
 // pollOrganizations checks each registered organization for version changes
 func (b *SQLBackend) pollOrganizations() {
-	orgs := b.registry.getAll()
-	for _, org := range orgs {
-		if err := b.pollOrganization(org); err != nil {
-			b.logger.Warn("Failed to poll organization",
-				slog.String("organization", org.id),
+	orgByID := make(map[string]*organization)
+	for _, org := range b.registry.getAll() {
+		orgByID[org.id] = org
+	}
+	if len(orgByID) == 0 {
+		return
+	}
+
+	pageSize := b.organizationStatePageSize()
+	cursor := ""
+	for {
+		states, nextCursor, err := b.getOrganizationStatesPage(cursor, pageSize)
+		if err != nil {
+			b.logger.Warn("Failed to poll organization states page",
+				slog.String("cursor", cursor),
 				slog.Any("error", err))
+			return
 		}
+		if len(states) == 0 {
+			return
+		}
+
+		for _, state := range states {
+			org, ok := orgByID[state.Organization]
+			if !ok {
+				continue
+			}
+			if err := b.pollOrganizationWithState(org, state); err != nil {
+				b.logger.Warn("Failed to poll organization",
+					slog.String("organization", org.id),
+					slog.Any("error", err))
+			}
+		}
+
+		if len(states) < pageSize {
+			return
+		}
+		cursor = nextCursor
 	}
 }
 
-// pollOrganization checks a single organization for version changes
-func (b *SQLBackend) pollOrganization(org *organization) error {
-	var state OrganizationState
-	err := b.getOrgStateStmt.QueryRow(org.id).Scan(&state.Organization, &state.VersionID, &state.UpdatedAt)
+func (b *SQLBackend) organizationStatePageSize() int {
+	if b.config.OrganizationStatePageSize > 0 {
+		return b.config.OrganizationStatePageSize
+	}
+	return defaultOrganizationStatePageSize
+}
+
+func (b *SQLBackend) getOrganizationStatesPage(cursor string, limit int) ([]OrganizationState, string, error) {
+	// TODO: (VirajSalaka) We can even optimize this by only selecting organizations that have had updates since the last poll time, 
+	// but that would require tracking last poll time per organization which adds complexity. For now, we can rely on the fact that 
+	// organizations with no changes will be quickly skipped in pollOrganizationWithState.
+	rows, err := b.getOrgStatesPageStmt.Query(cursor, limit)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil // Organization not yet initialized
+		return nil, "", fmt.Errorf("failed to query organization states page: %w", err)
+	}
+	defer rows.Close()
+
+	states := make([]OrganizationState, 0, limit)
+	nextCursor := ""
+	for rows.Next() {
+		var state OrganizationState
+		if err := rows.Scan(&state.Organization, &state.VersionID, &state.UpdatedAt); err != nil {
+			return nil, "", fmt.Errorf("failed to scan organization state row: %w", err)
 		}
-		return fmt.Errorf("failed to query organization state: %w", err)
+		states = append(states, state)
+		nextCursor = state.Organization
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("error iterating organization state rows: %w", err)
 	}
 
+	return states, nextCursor, nil
+}
+
+func (b *SQLBackend) pollOrganizationWithState(org *organization, state OrganizationState) error {
 	// Check if version has changed
 	b.registry.mu.RLock()
 	knownVersion := org.knownVersion
@@ -321,10 +413,10 @@ func (b *SQLBackend) pollOrganization(org *organization) error {
 	// Fetch new events since last poll
 	var lastPolledTime time.Time
 	if org.lastPolled > 0 {
-		lastPolledTime = time.Unix(0, org.lastPolled)
+		lastPolledTime = unixTimestampToTime(org.lastPolled)
 	} else {
-		// First poll - use epoch to catch all events
-		lastPolledTime = time.Unix(0, 0)
+		// First poll - only replay a short recent window to avoid catching full history.
+		lastPolledTime = time.Now().Add(-initialPollSkewWindow)
 	}
 
 	rows, err := b.getEventsStmt.Query(org.id, lastPolledTime)
@@ -360,6 +452,9 @@ func (b *SQLBackend) pollOrganization(org *organization) error {
 		return fmt.Errorf("error iterating event rows: %w", err)
 	}
 
+	// TODO: (VirajSalaka) In the initial startup, we fetch the past events for 120 seconds. 
+	// But if there are lot of events during the period, we need to capture the tail events.
+	
 	// Deliver events to subscribers
 	for _, evt := range events {
 		for _, ch := range subscribers {
