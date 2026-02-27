@@ -250,6 +250,49 @@ func TestSQLiteStorage_GetConfigByNameVersion_JSONError(t *testing.T) {
 	assert.Assert(t, err != nil)
 }
 
+func TestSQLiteStorage_UpdateConfig_UniqueConstraintError(t *testing.T) {
+	t.Run("handle conflict", func(t *testing.T) {
+		storage := setupTestStorage(t)
+		defer storage.db.Close()
+
+		config1 := createTestStoredConfig()
+		config2 := createTestStoredConfig()
+
+		err := storage.SaveConfig(config1)
+		assert.NilError(t, err)
+		err = storage.SaveConfig(config2)
+		assert.NilError(t, err)
+
+		config2.Configuration.Metadata.Name = config1.Configuration.Metadata.Name
+		err = storage.UpdateConfig(config2)
+		assert.Assert(t, errors.Is(err, ErrConflict))
+	})
+
+	t.Run("display_name/version conflict", func(t *testing.T) {
+		storage := setupTestStorage(t)
+		defer storage.db.Close()
+
+		config1 := createTestStoredConfig()
+		config2 := createTestStoredConfig()
+
+		err := storage.SaveConfig(config1)
+		assert.NilError(t, err)
+		err = storage.SaveConfig(config2)
+		assert.NilError(t, err)
+
+		var conflictSpec api.APIConfiguration_Spec
+		conflictSpec.FromAPIConfigData(api.APIConfigData{
+			DisplayName: config1.GetDisplayName(),
+			Version:     config1.GetVersion(),
+			Context:     config2.GetContext(),
+		})
+		config2.Configuration.Spec = conflictSpec
+
+		err = storage.UpdateConfig(config2)
+		assert.Assert(t, errors.Is(err, ErrConflict))
+	})
+}
+
 func TestSQLiteStorage_GetAllConfigs_Success(t *testing.T) {
 	storage := setupTestStorage(t)
 	defer storage.db.Close()

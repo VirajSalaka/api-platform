@@ -105,11 +105,11 @@ func (s *APIDeploymentService) publishEvent(eventType eventhub.EventType, action
 	event := eventhub.Event{
 		OrganizationID:      "default",
 		OriginatedTimestamp: time.Now(),
-		EventType:          eventType,
-		Action:             action,
-		EntityID:           entityID,
-		CorrelationID:      correlationID,
-		EventData:          fmt.Sprintf(`{"entity_id":"%s","action":"%s"}`, entityID, action),
+		EventType:           eventType,
+		Action:              action,
+		EntityID:            entityID,
+		CorrelationID:       correlationID,
+		EventData:           fmt.Sprintf(`{"entity_id":"%s","action":"%s"}`, entityID, action),
 	}
 
 	if err := s.eventHub.PublishEvent("default", event); err != nil {
@@ -181,35 +181,39 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 	handle := apiConfig.Metadata.Name
 
 	// Determine if this is an update or create by checking if config with apiID already exists
-	var existingConfig *models.StoredConfig
 	var isUpdate bool
 
 	// Check for conflicts with other configurations
 	// For updates: only error if name/version/handle belong to a different config ID
 	// For creates: any conflict is an error
-	if s.store != nil {
-		existingConfig, _ = s.store.Get(apiID)
+	if s.db != nil {
+		existingConfig, err := s.db.GetConfig(apiID)
+		if err != nil && !storage.IsNotFoundError(err) {
+			return nil, fmt.Errorf("failed to check existing configuration in database: %w", err)
+		}
 		isUpdate = existingConfig != nil
 
 		// Check name+version conflict
-		if conflicting, err := s.store.GetByNameVersion(apiName, apiVersion); err == nil {
+		if conflicting, err := s.db.GetConfigByNameVersion(apiName, apiVersion); err == nil {
 			// For updates: only error if the conflict is with a different API
 			// For creates: any conflict is an error
 			if !isUpdate || conflicting.ID != apiID {
 				return nil, fmt.Errorf("%w: configuration with name '%s' and version '%s' already exists", storage.ErrConflict, apiName, apiVersion)
 			}
+		} else if !storage.IsNotFoundError(err) {
+			return nil, fmt.Errorf("failed to check name/version conflicts in database: %w", err)
 		}
 
 		// Check handle conflict
 		if handle != "" {
-			for _, c := range s.store.GetAll() {
-				if c.GetHandle() == handle {
-					// For updates: only error if the conflict is with a different API
-					// For creates: any conflict is an error
-					if !isUpdate || c.ID != apiID {
-						return nil, fmt.Errorf("%w: configuration with handle '%s' already exists", storage.ErrConflict, handle)
-					}
+			if conflicting, err := s.db.GetConfigByHandle(handle); err == nil {
+				// For updates: only error if the conflict is with a different API
+				// For creates: any conflict is an error
+				if !isUpdate || conflicting.ID != apiID {
+					return nil, fmt.Errorf("%w: configuration with handle '%s' already exists", storage.ErrConflict, handle)
 				}
+			} else if !storage.IsNotFoundError(err) {
+				return nil, fmt.Errorf("failed to check handle conflicts in database: %w", err)
 			}
 		}
 	}
@@ -338,19 +342,6 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 			slog.String("correlation_id", params.CorrelationID))
 	}
 
-	// Update xDS snapshot asynchronously
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := s.snapshotManager.UpdateSnapshot(ctx, params.CorrelationID); err != nil {
-			params.Logger.Error("Failed to update xDS snapshot",
-				slog.Any("error", err),
-				slog.String("api_id", apiID),
-				slog.String("correlation_id", params.CorrelationID))
-		}
-	}()
-
 	// Publish event to event hub for multi-replica sync
 	if isUpdate {
 		s.publishEvent(eventhub.EventTypeAPI, "UPDATE", apiID, params.CorrelationID, params.Logger)
@@ -408,20 +399,23 @@ func (s *APIDeploymentService) GetTopicsForDelete(apiConfig models.StoredConfig)
 
 // saveOrUpdateConfig handles the atomic dual-write operation for saving/updating configuration
 func (s *APIDeploymentService) saveOrUpdateConfig(storedCfg *models.StoredConfig, logger *slog.Logger) (bool, error) {
-	existing, _ := s.store.Get(storedCfg.ID)
-
-	// If config already exists, update it
-	if existing != nil {
-		logger.Info("API configuration already exists, updating",
-			slog.String("api_id", storedCfg.ID),
-			slog.String("displayName", storedCfg.GetDisplayName()),
-			slog.String("version", storedCfg.GetVersion()))
-		return s.updateExistingConfig(storedCfg, existing, logger)
-	}
-
 	// Save new config to database first (only if persistent mode)
 	if s.db != nil {
 		if err := s.db.SaveConfig(storedCfg); err != nil {
+			if storage.IsConflictError(err) {
+				existing, getErr := s.db.GetConfig(storedCfg.ID)
+				if getErr != nil {
+					if storage.IsNotFoundError(getErr) {
+						return false, fmt.Errorf("failed to save config to database: %w", err)
+					}
+					return false, fmt.Errorf("failed to check existing config in database: %w", getErr)
+				}
+				logger.Info("API configuration already exists in database, updating",
+					slog.String("api_id", storedCfg.ID),
+					slog.String("displayName", storedCfg.GetDisplayName()),
+					slog.String("version", storedCfg.GetVersion()))
+				return s.updateExistingConfig(storedCfg, existing, logger)
+			}
 			logger.Info("Error saving new API configuration to database",
 				slog.String("api_id", storedCfg.ID),
 				slog.String("displayName", storedCfg.GetDisplayName()),
@@ -429,19 +423,7 @@ func (s *APIDeploymentService) saveOrUpdateConfig(storedCfg *models.StoredConfig
 			return false, fmt.Errorf("failed to save config to database: %w", err)
 		}
 	}
-
-	// Add to in-memory store
-	if err := s.store.Add(storedCfg); err != nil {
-		// Rollback database write (only if persistent mode)
-		if s.db != nil {
-			logger.Info("Error adding new API configuration to memory store, rolling back database",
-				slog.String("api_id", storedCfg.ID),
-				slog.String("displayName", storedCfg.GetDisplayName()),
-				slog.String("version", storedCfg.GetVersion()))
-			_ = s.db.DeleteConfig(storedCfg.ID)
-		}
-		return false, fmt.Errorf("failed to add config to memory store: %w", err)
-	}
+	// In-memory store save only happens during synchronization
 
 	return false, nil // Successfully created new config
 }
@@ -449,10 +431,6 @@ func (s *APIDeploymentService) saveOrUpdateConfig(storedCfg *models.StoredConfig
 // updateExistingConfig updates an existing API configuration
 func (s *APIDeploymentService) updateExistingConfig(newConfig *models.StoredConfig,
 	existing *models.StoredConfig, logger *slog.Logger) (bool, error) {
-
-	// Backup original state for potential rollback
-	original := *existing
-
 	// Update the existing configuration
 	now := time.Now()
 	existing.Configuration = newConfig.Configuration
@@ -467,25 +445,15 @@ func (s *APIDeploymentService) updateExistingConfig(newConfig *models.StoredConf
 		if err := s.db.UpdateConfig(existing); err != nil {
 			return false, fmt.Errorf("failed to update config in database: %w", err)
 		}
-	}
-
-	// Update in-memory store
-	if err := s.store.Update(existing); err != nil {
-		// Rollback DB to original state since memory update failed
-		if s.db != nil {
-			if rbErr := s.db.UpdateConfig(&original); rbErr != nil {
-				logger.Error("Failed to rollback DB after memory update failure",
-					slog.Any("error", rbErr),
-					slog.String("id", original.ID),
-					slog.String("displayName", original.GetDisplayName()),
-					slog.String("version", original.GetVersion()))
-			}
-		}
-		return false, fmt.Errorf("failed to update config in memory store: %w", err)
+	} else {
+		return false, fmt.Errorf("%w: cannot update config without database", storage.ErrDatabaseUnavailable)
 	}
 
 	// Update the newConfig to reflect the changes
 	*newConfig = *existing
+
+	logger.Debug("Skipped in-memory update in write path; memory sync is eventhub-driven",
+		slog.String("api_id", newConfig.ID))
 
 	return true, nil // Successfully updated existing config
 }
