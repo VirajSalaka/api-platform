@@ -434,3 +434,66 @@ func TestPollOrganizationWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 }
+
+func TestPollOrganizationWithStateRetriesDeferredEventsFromLastDeliveredTimestamp(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	backend := NewSQLBackend(db, logger, DefaultSQLBackendConfig())
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	require.NoError(t, backend.RegisterOrganization("test-org"))
+
+	ch := make(chan Event, 1)
+	require.NoError(t, backend.registry.addSubscriber("test-org", ch))
+
+	firstTs := time.Now().Add(-2 * time.Second)
+	secondTs := firstTs.Add(10 * time.Millisecond)
+	_, err := db.Exec(`
+		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, event_type, action, entity_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)
+	`,
+		"test-org", firstTs, firstTs, "API", "CREATE", "first-entity", "{}",
+		"test-org", secondTs, secondTs, "API", "CREATE", "second-entity", "{}",
+	)
+	require.NoError(t, err)
+
+	org, err := backend.registry.get("test-org")
+	require.NoError(t, err)
+
+	state := OrganizationState{
+		Organization: "test-org",
+		VersionID:    "v1",
+	}
+
+	require.NoError(t, backend.pollOrganizationWithState(org, state))
+
+	select {
+	case evt := <-ch:
+		assert.Equal(t, "first-entity", evt.EntityID)
+		assert.Equal(t, evt.ProcessedTimestamp.UnixNano(), org.lastPolled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first event")
+	}
+	assert.Empty(t, org.knownVersion)
+
+	require.NoError(t, backend.pollOrganizationWithState(org, state))
+
+	select {
+	case evt := <-ch:
+		assert.Equal(t, "second-entity", evt.EntityID)
+		assert.Equal(t, evt.ProcessedTimestamp.UnixNano(), org.lastPolled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second event")
+	}
+	assert.Equal(t, "v1", org.knownVersion)
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected additional event delivered: %s", evt.EntityID)
+	case <-time.After(150 * time.Millisecond):
+	}
+}

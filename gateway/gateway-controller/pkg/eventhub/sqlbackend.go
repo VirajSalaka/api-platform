@@ -371,9 +371,20 @@ func (b *SQLBackend) organizationStatePageSize() int {
 	return defaultOrganizationStatePageSize
 }
 
+func subscriberChannelsAvailable(subscribers []chan Event) bool {
+	for _, ch := range subscribers {
+		// Subscriber channels are buffered. If any buffer is full, stop
+		// advancing so the next poll can retry the same event batch.
+		if len(ch) == cap(ch) {
+			return false
+		}
+	}
+	return true
+}
+
 func (b *SQLBackend) getOrganizationStatesPage(cursor string, limit int) ([]OrganizationState, string, error) {
-	// TODO: (VirajSalaka) We can even optimize this by only selecting organizations that have had updates since the last poll time, 
-	// but that would require tracking last poll time per organization which adds complexity. For now, we can rely on the fact that 
+	// TODO: (VirajSalaka) We can even optimize this by only selecting organizations that have had updates since the last poll time,
+	// but that would require tracking last poll time per organization which adds complexity. For now, we can rely on the fact that
 	// organizations with no changes will be quickly skipped in pollOrganizationWithState.
 	rows, err := b.getOrgStatesPageStmt.Query(cursor, limit)
 	if err != nil {
@@ -402,6 +413,7 @@ func (b *SQLBackend) pollOrganizationWithState(org *organization, state Organiza
 	// Check if version has changed
 	b.registry.mu.RLock()
 	knownVersion := org.knownVersion
+	lastPolled := org.lastPolled
 	subscribers := make([]chan Event, len(org.subscribers))
 	copy(subscribers, org.subscribers)
 	b.registry.mu.RUnlock()
@@ -412,8 +424,8 @@ func (b *SQLBackend) pollOrganizationWithState(org *organization, state Organiza
 
 	// Fetch new events since last poll
 	var lastPolledTime time.Time
-	if org.lastPolled > 0 {
-		lastPolledTime = unixTimestampToTime(org.lastPolled)
+	if lastPolled > 0 {
+		lastPolledTime = unixTimestampToTime(lastPolled)
 	} else {
 		// First poll - only replay a short recent window to avoid catching full history.
 		lastPolledTime = time.Now().Add(-initialPollSkewWindow)
@@ -426,7 +438,6 @@ func (b *SQLBackend) pollOrganizationWithState(org *organization, state Organiza
 	defer rows.Close()
 
 	var events []Event
-	var latestTimestamp time.Time
 	for rows.Next() {
 		var evt Event
 		var eventType string
@@ -444,42 +455,54 @@ func (b *SQLBackend) pollOrganizationWithState(org *organization, state Organiza
 		}
 		evt.EventType = EventType(eventType)
 		events = append(events, evt)
-		if evt.ProcessedTimestamp.After(latestTimestamp) {
-			latestTimestamp = evt.ProcessedTimestamp
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("error iterating event rows: %w", err)
 	}
 
-	// TODO: (VirajSalaka) In the initial startup, we fetch the past events for 120 seconds. 
+	// TODO: (VirajSalaka) In the initial startup, we fetch the past events for 120 seconds.
 	// But if there are lot of events during the period, we need to capture the tail events.
-	
-	// Deliver events to subscribers
+
+	// Deliver events to subscribers. If any subscriber buffer is full, stop at
+	// the first blocked event so the next poll resumes from the last delivered one.
+	var latestDeliveredTimestamp time.Time
+	deliveredCount := 0
+	deliveryBlocked := false
 	for _, evt := range events {
-		for _, ch := range subscribers {
-			select {
-			case ch <- evt:
-			default:
-				b.logger.Warn("Subscriber channel full, dropping event",
-					slog.String("organization", org.id),
-					slog.String("entity_id", evt.EntityID))
-			}
+		if !subscriberChannelsAvailable(subscribers) {
+			deliveryBlocked = true
+			b.logger.Warn("Subscriber channel full, deferring event delivery",
+				slog.String("organization", org.id),
+				slog.String("entity_id", evt.EntityID))
+			break
 		}
+		for _, ch := range subscribers {
+			ch <- evt
+		}
+		latestDeliveredTimestamp = evt.ProcessedTimestamp
+		deliveredCount++
 	}
 
 	// Update known version and last polled time
 	b.registry.mu.Lock()
-	org.knownVersion = state.VersionID
-	if !latestTimestamp.IsZero() {
-		org.lastPolled = latestTimestamp.UnixNano()
+	if deliveryBlocked {
+		if !latestDeliveredTimestamp.IsZero() {
+			org.lastPolled = latestDeliveredTimestamp.UnixNano()
+		} else {
+			org.lastPolled = lastPolledTime.UnixNano()
+		}
+	} else {
+		org.knownVersion = state.VersionID
+		if !latestDeliveredTimestamp.IsZero() {
+			org.lastPolled = latestDeliveredTimestamp.UnixNano()
+		}
 	}
 	b.registry.mu.Unlock()
 
-	if len(events) > 0 {
+	if deliveredCount > 0 {
 		b.logger.Debug("Delivered events to subscribers",
 			slog.String("organization", org.id),
-			slog.Int("event_count", len(events)),
+			slog.Int("event_count", deliveredCount),
 			slog.Int("subscriber_count", len(subscribers)))
 	}
 
