@@ -98,6 +98,7 @@ type Controller struct {
 	Server       ServerConfig       `koanf:"server"`
 	AdminServer  AdminServerConfig  `koanf:"admin_server"`
 	Storage      StorageConfig      `koanf:"storage"`
+	EventHub     EventHubConfig     `koanf:"eventhub"`
 	Logging      LoggingConfig      `koanf:"logging"`
 	ControlPlane ControlPlaneConfig `koanf:"controlplane"`
 	PolicyServer PolicyServerConfig `koanf:"policy_server"`
@@ -105,6 +106,11 @@ type Controller struct {
 	LLM          LLMConfig          `koanf:"llm"`
 	Auth         AuthConfig         `koanf:"auth"`
 	Metrics      MetricsConfig      `koanf:"metrics"`
+}
+
+// EventHubConfig holds controller event hub configuration.
+type EventHubConfig struct {
+	Storage StorageConfig `koanf:"storage"`
 }
 
 // MetricsConfig holds Prometheus metrics server configuration
@@ -495,6 +501,7 @@ func defaultConfig() *Config {
 					ApplicationName: "gateway-controller",
 				},
 			},
+			EventHub: EventHubConfig{},
 			Auth: AuthConfig{
 				Basic: BasicAuth{
 					Enabled: true,
@@ -670,100 +677,14 @@ func defaultConfig() *Config {
 
 // Validate validates the configuration
 func (c *Config) Validate() error {
-	// Validate storage type
-	validStorageTypes := []string{"sqlite", "postgres", "memory"}
-	isValidType := false
-	for _, t := range validStorageTypes {
-		if c.Controller.Storage.Type == t {
-			isValidType = true
-			break
-		}
-	}
-	if !isValidType {
-		return fmt.Errorf("storage.type must be one of: sqlite, postgres, memory, got: %s", c.Controller.Storage.Type)
+	if err := validateStorageConfig(&c.Controller.Storage, "storage", []string{"sqlite", "postgres", "memory"}); err != nil {
+		return err
 	}
 
-	// Validate SQLite configuration
-	if c.Controller.Storage.Type == "sqlite" && c.Controller.Storage.SQLite.Path == "" {
-		return fmt.Errorf("storage.sqlite.path is required when storage.type is 'sqlite'")
-	}
-
-	// Validate PostgreSQL configuration
-	if c.Controller.Storage.Type == "postgres" {
-		pg := &c.Controller.Storage.Postgres
-
-		if pg.DSN == "" {
-			if pg.Host == "" {
-				return fmt.Errorf("storage.postgres.host is required when storage.type is 'postgres' and storage.postgres.dsn is empty")
-			}
-			if pg.Database == "" {
-				return fmt.Errorf("storage.postgres.database is required when storage.type is 'postgres' and storage.postgres.dsn is empty")
-			}
-			if pg.User == "" {
-				return fmt.Errorf("storage.postgres.user is required when storage.type is 'postgres' and storage.postgres.dsn is empty")
-			}
-		}
-
-		if pg.Port <= 0 {
-			pg.Port = 5432
-		}
-		if pg.Port > 65535 {
-			return fmt.Errorf("storage.postgres.port must be between 1 and 65535, got: %d", pg.Port)
-		}
-
-		if pg.SSLMode == "" {
-			pg.SSLMode = "require"
-		}
-		validSSLModes := []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
-		isValidSSLMode := false
-		for _, mode := range validSSLModes {
-			if strings.EqualFold(pg.SSLMode, mode) {
-				pg.SSLMode = mode
-				isValidSSLMode = true
-				break
-			}
-		}
-		if !isValidSSLMode {
-			return fmt.Errorf("storage.postgres.sslmode must be one of: disable, allow, prefer, require, verify-ca, verify-full, got: %s", pg.SSLMode)
-		}
-
-		if pg.ConnectTimeout <= 0 {
-			pg.ConnectTimeout = 5 * time.Second
-		}
-
-		if pg.MaxOpenConns == 0 {
-			pg.MaxOpenConns = 25
-		}
-		if pg.MaxOpenConns < 1 {
-			return fmt.Errorf("storage.postgres.max_open_conns must be >= 1, got: %d", pg.MaxOpenConns)
-		}
-
-		if pg.MaxIdleConns == 0 {
-			pg.MaxIdleConns = 5
-		}
-		if pg.MaxIdleConns < 0 {
-			return fmt.Errorf("storage.postgres.max_idle_conns must be >= 0, got: %d", pg.MaxIdleConns)
-		}
-		if pg.MaxIdleConns > pg.MaxOpenConns {
-			pg.MaxIdleConns = pg.MaxOpenConns
-		}
-
-		if pg.ConnMaxLifetime == 0 {
-			pg.ConnMaxLifetime = 30 * time.Minute
-		}
-		if pg.ConnMaxLifetime < 0 {
-			return fmt.Errorf("storage.postgres.conn_max_lifetime must be >= 0, got: %s", pg.ConnMaxLifetime)
-		}
-
-		if pg.ConnMaxIdleTime == 0 {
-			pg.ConnMaxIdleTime = 5 * time.Minute
-		}
-		if pg.ConnMaxIdleTime < 0 {
-			return fmt.Errorf("storage.postgres.conn_max_idle_time must be >= 0, got: %s", pg.ConnMaxIdleTime)
-		}
-
-		if pg.ApplicationName == "" {
-			pg.ApplicationName = "gateway-controller"
+	if c.IsPersistentMode() {
+		eventHubStorage := c.ResolvedEventHubStorage()
+		if err := validateStorageConfig(&eventHubStorage, "eventhub.storage", []string{"sqlite", "postgres"}); err != nil {
+			return err
 		}
 	}
 
@@ -906,6 +827,168 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+func validateStorageConfig(cfg *StorageConfig, fieldPrefix string, validTypes []string) error {
+	isValidType := false
+	for _, t := range validTypes {
+		if cfg.Type == t {
+			isValidType = true
+			break
+		}
+	}
+	if !isValidType {
+		return fmt.Errorf("%s.type must be one of: %s, got: %s", fieldPrefix, strings.Join(validTypes, ", "), cfg.Type)
+	}
+
+	if cfg.Type == "sqlite" {
+		if cfg.SQLite.Path == "" {
+			return fmt.Errorf("%s.sqlite.path is required when %s.type is 'sqlite'", fieldPrefix, fieldPrefix)
+		}
+	}
+
+	if cfg.Type == "postgres" {
+		pg := &cfg.Postgres
+
+		if pg.DSN == "" {
+			if pg.Host == "" {
+				return fmt.Errorf("%s.postgres.host is required when %s.type is 'postgres' and %s.postgres.dsn is empty",
+					fieldPrefix, fieldPrefix, fieldPrefix)
+			}
+			if pg.Database == "" {
+				return fmt.Errorf("%s.postgres.database is required when %s.type is 'postgres' and %s.postgres.dsn is empty",
+					fieldPrefix, fieldPrefix, fieldPrefix)
+			}
+			if pg.User == "" {
+				return fmt.Errorf("%s.postgres.user is required when %s.type is 'postgres' and %s.postgres.dsn is empty",
+					fieldPrefix, fieldPrefix, fieldPrefix)
+			}
+		}
+
+		if pg.Port <= 0 {
+			pg.Port = 5432
+		}
+		if pg.Port > 65535 {
+			return fmt.Errorf("%s.postgres.port must be between 1 and 65535, got: %d", fieldPrefix, pg.Port)
+		}
+
+		if pg.SSLMode == "" {
+			pg.SSLMode = "require"
+		}
+		validSSLModes := []string{"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
+		isValidSSLMode := false
+		for _, mode := range validSSLModes {
+			if strings.EqualFold(pg.SSLMode, mode) {
+				pg.SSLMode = mode
+				isValidSSLMode = true
+				break
+			}
+		}
+		if !isValidSSLMode {
+			return fmt.Errorf("%s.postgres.sslmode must be one of: disable, allow, prefer, require, verify-ca, verify-full, got: %s",
+				fieldPrefix, pg.SSLMode)
+		}
+
+		if pg.ConnectTimeout <= 0 {
+			pg.ConnectTimeout = 5 * time.Second
+		}
+
+		if pg.MaxOpenConns == 0 {
+			pg.MaxOpenConns = 25
+		}
+		if pg.MaxOpenConns < 1 {
+			return fmt.Errorf("%s.postgres.max_open_conns must be >= 1, got: %d", fieldPrefix, pg.MaxOpenConns)
+		}
+
+		if pg.MaxIdleConns == 0 {
+			pg.MaxIdleConns = 5
+		}
+		if pg.MaxIdleConns < 0 {
+			return fmt.Errorf("%s.postgres.max_idle_conns must be >= 0, got: %d", fieldPrefix, pg.MaxIdleConns)
+		}
+		if pg.MaxIdleConns > pg.MaxOpenConns {
+			pg.MaxIdleConns = pg.MaxOpenConns
+		}
+
+		if pg.ConnMaxLifetime == 0 {
+			pg.ConnMaxLifetime = 30 * time.Minute
+		}
+		if pg.ConnMaxLifetime < 0 {
+			return fmt.Errorf("%s.postgres.conn_max_lifetime must be >= 0, got: %s", fieldPrefix, pg.ConnMaxLifetime)
+		}
+
+		if pg.ConnMaxIdleTime == 0 {
+			pg.ConnMaxIdleTime = 5 * time.Minute
+		}
+		if pg.ConnMaxIdleTime < 0 {
+			return fmt.Errorf("%s.postgres.conn_max_idle_time must be >= 0, got: %s", fieldPrefix, pg.ConnMaxIdleTime)
+		}
+
+		if pg.ApplicationName == "" {
+			pg.ApplicationName = "gateway-controller"
+		}
+	}
+
+	return nil
+}
+
+func mergeStorageConfig(base, override StorageConfig) StorageConfig {
+	resolved := base
+	if override.Type != "" && override.Type != base.Type {
+		resolved = StorageConfig{}
+	}
+	if override.Type != "" {
+		resolved.Type = override.Type
+	}
+	if override.SQLite.Path != "" {
+		resolved.SQLite.Path = override.SQLite.Path
+	}
+	resolved.Postgres = mergePostgresConfig(resolved.Postgres, override.Postgres)
+	return resolved
+}
+
+func mergePostgresConfig(base, override PostgresConfig) PostgresConfig {
+	resolved := base
+	if override.DSN != "" {
+		resolved.DSN = override.DSN
+	}
+	if override.Host != "" {
+		resolved.Host = override.Host
+	}
+	if override.Port != 0 {
+		resolved.Port = override.Port
+	}
+	if override.Database != "" {
+		resolved.Database = override.Database
+	}
+	if override.User != "" {
+		resolved.User = override.User
+	}
+	if override.Password != "" {
+		resolved.Password = override.Password
+	}
+	if override.SSLMode != "" {
+		resolved.SSLMode = override.SSLMode
+	}
+	if override.ConnectTimeout != 0 {
+		resolved.ConnectTimeout = override.ConnectTimeout
+	}
+	if override.MaxOpenConns != 0 {
+		resolved.MaxOpenConns = override.MaxOpenConns
+	}
+	if override.MaxIdleConns != 0 {
+		resolved.MaxIdleConns = override.MaxIdleConns
+	}
+	if override.ConnMaxLifetime != 0 {
+		resolved.ConnMaxLifetime = override.ConnMaxLifetime
+	}
+	if override.ConnMaxIdleTime != 0 {
+		resolved.ConnMaxIdleTime = override.ConnMaxIdleTime
+	}
+	if override.ApplicationName != "" {
+		resolved.ApplicationName = override.ApplicationName
+	}
+	return resolved
 }
 
 func (c *Config) validateEventGatewayConfig() error {
@@ -1399,6 +1482,12 @@ func (c *Config) validateAPIKeyConfig() error {
 // IsPersistentMode returns true if storage type is not memory
 func (c *Config) IsPersistentMode() bool {
 	return c.Controller.Storage.Type != "memory"
+}
+
+// ResolvedEventHubStorage returns the storage configuration intended for EventHub.
+// When controller.eventhub.storage is omitted, it inherits the main controller storage settings.
+func (c *Config) ResolvedEventHubStorage() StorageConfig {
+	return mergeStorageConfig(c.Controller.Storage, c.Controller.EventHub.Storage)
 }
 
 // IsMemoryOnlyMode returns true if storage type is memory

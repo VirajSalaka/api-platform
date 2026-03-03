@@ -43,11 +43,11 @@ var (
 	BuildDate = "unknown"
 )
 
-func toBackendConfig(cfg *config.Config) storage.BackendConfig {
-	pg := cfg.Controller.Storage.Postgres
+func toBackendConfig(storageCfg config.StorageConfig, gatewayID string) storage.BackendConfig {
+	pg := storageCfg.Postgres
 	return storage.BackendConfig{
-		Type:       cfg.Controller.Storage.Type,
-		SQLitePath: cfg.Controller.Storage.SQLite.Path,
+		Type:       storageCfg.Type,
+		SQLitePath: storageCfg.SQLite.Path,
 		Postgres: storage.PostgresConnectionConfig{
 			DSN:             pg.DSN,
 			Host:            pg.Host,
@@ -63,7 +63,7 @@ func toBackendConfig(cfg *config.Config) storage.BackendConfig {
 			ConnMaxIdleTime: pg.ConnMaxIdleTime,
 			ApplicationName: pg.ApplicationName,
 		},
-		GatewayID: cfg.Controller.Server.GatewayID,
+		GatewayID: gatewayID,
 	}
 }
 
@@ -115,7 +115,7 @@ func main() {
 	// Initialize storage based on type
 	var db storage.Storage
 	if cfg.IsPersistentMode() {
-		db, err = storage.NewStorage(toBackendConfig(cfg), log)
+		db, err = storage.NewStorage(toBackendConfig(cfg.Controller.Storage, cfg.Controller.Server.GatewayID), log)
 		if err != nil {
 			if strings.EqualFold(cfg.Controller.Storage.Type, "sqlite") && errors.Is(err, storage.ErrDatabaseLocked) {
 				log.Error("Database is locked by another process",
@@ -312,16 +312,34 @@ func main() {
 
 	// Initialize EventHub and EventListener for multi-replica sync (when persistent storage is available)
 	var eventHubInstance eventhub.EventHub
+	var eventHubStorage storage.Storage
 	var evtListener *eventlistener.EventListener
 	if cfg.IsPersistentMode() {
-		sqlDB := db.GetDB()
-		if sqlDB == nil {
+		eventHubStorageCfg := cfg.ResolvedEventHubStorage()
+		log.Info("Initializing EventHub for multi-replica synchronization",
+			slog.String("storage_type", eventHubStorageCfg.Type))
+
+		eventHubStorage, err = storage.NewStorage(toBackendConfig(eventHubStorageCfg, cfg.Controller.Server.GatewayID), log)
+		if err != nil {
+			if strings.EqualFold(eventHubStorageCfg.Type, "sqlite") && errors.Is(err, storage.ErrDatabaseLocked) {
+				log.Error("EventHub database is locked by another process",
+					slog.String("database_path", eventHubStorageCfg.SQLite.Path),
+					slog.String("troubleshooting", "Check if another process is using the configured EventHub database or remove stale WAL files"))
+				os.Exit(1)
+			}
+			log.Error("Failed to initialize EventHub storage",
+				slog.String("type", eventHubStorageCfg.Type),
+				slog.Any("error", err))
+			os.Exit(1)
+		}
+
+		eventHubDB := eventHubStorage.GetDB()
+		if eventHubDB == nil {
 			log.Error("EventHub requires a SQL-backed storage with GetDB() support")
 			os.Exit(1)
 		}
 
-		log.Info("Initializing EventHub for multi-replica synchronization")
-		eventHubInstance = eventhub.New(sqlDB, log, eventhub.DefaultConfig())
+		eventHubInstance = eventhub.New(eventHubDB, log, eventhub.DefaultConfig())
 		if err := eventHubInstance.Initialize(); err != nil {
 			log.Error("Failed to initialize EventHub", slog.Any("error", err))
 			os.Exit(1)
@@ -510,6 +528,12 @@ func main() {
 	if eventHubInstance != nil {
 		if err := eventHubInstance.Close(); err != nil {
 			log.Error("Failed to close EventHub", slog.Any("error", err))
+		}
+	}
+
+	if eventHubStorage != nil {
+		if err := eventHubStorage.Close(); err != nil {
+			log.Error("Failed to close EventHub storage", slog.Any("error", err))
 		}
 	}
 
