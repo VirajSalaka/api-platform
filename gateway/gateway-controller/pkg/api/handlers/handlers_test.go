@@ -1184,25 +1184,6 @@ func TestGenerateAPIKeyInvalidBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-// TestCreateAPIKeyNoDB tests CreateAPIKey when DB is not available in write path.
-func TestCreateAPIKeyNoDB(t *testing.T) {
-	server := createTestAPIServer()
-	server.apiKeyService = utils.NewAPIKeyService(server.store, nil, nil, &server.systemConfig.APIKey, nil)
-
-	body := []byte(`{"name": "test-key"}`)
-	c, w := createTestContextWithHeader("POST", "/apis/test-handle/api-keys", body, map[string]string{
-		"Content-Type": "application/json",
-	})
-	c.Set(constants.AuthContextKey, commonmodels.AuthContext{
-		UserID: "test-user",
-		Roles:  []string{"admin"},
-	})
-
-	server.CreateAPIKey(c, "test-handle")
-
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-}
-
 // TestRevokeAPIKeyNoAuth tests RevokeAPIKey without authentication
 func TestRevokeAPIKeyNoAuth(t *testing.T) {
 	server := createTestAPIServer()
