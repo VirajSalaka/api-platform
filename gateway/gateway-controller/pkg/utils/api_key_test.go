@@ -41,7 +41,7 @@ func TestNewAPIKeyService(t *testing.T) {
 		Algorithm:            constants.HashingAlgorithmSHA256,
 	}
 
-	service := NewAPIKeyService(store, nil, nil, apiKeyConfig)
+	service := NewAPIKeyService(store, nil, nil, apiKeyConfig, nil)
 	assert.NotNil(t, service)
 	assert.Equal(t, store, service.store)
 	assert.Equal(t, apiKeyConfig, service.apiKeyConfig)

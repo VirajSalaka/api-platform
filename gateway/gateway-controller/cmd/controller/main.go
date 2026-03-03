@@ -338,6 +338,7 @@ func main() {
 			configStore,
 			db,
 			snapshotManager,
+			apiKeyXDSManager,
 			policyManager,
 			&cfg.Router,
 			log,

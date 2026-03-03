@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 
 	commonmodels "github.com/wso2/api-platform/common/models"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
@@ -135,19 +136,99 @@ type APIKeyService struct {
 	db           storage.Storage
 	xdsManager   XDSManager
 	apiKeyConfig *config.APIKeyConfig // Configuration for API keys
+	eventHub     eventhub.EventHub
 }
 
 // NewAPIKeyService creates a new API key generation service
 func NewAPIKeyService(store *storage.ConfigStore, db storage.Storage, xdsManager XDSManager,
-	apiKeyConfig *config.APIKeyConfig) *APIKeyService {
+	apiKeyConfig *config.APIKeyConfig, hub eventhub.EventHub) *APIKeyService {
 	return &APIKeyService{
 		store:        store,
 		db:           db,
 		xdsManager:   xdsManager,
 		apiKeyConfig: apiKeyConfig,
+		eventHub:     hub,
 	}
 }
 
+func (s *APIKeyService) getAPIConfigByHandle(handle string) (*models.StoredConfig, error) {
+
+	if s.db != nil {
+		cfg, err := s.db.GetConfigByHandle(handle)
+		if err == nil {
+			return cfg, nil
+		}
+	}
+
+	return nil, fmt.Errorf("%w: handle=%s", storage.ErrNotFound, handle)
+}
+
+// publishEvent publishes an API key event to the event hub.
+func (s *APIKeyService) publishEvent(eventType eventhub.EventType, action, entityID, correlationID string, logger *slog.Logger) {
+	if s.eventHub == nil {
+		return
+	}
+
+	event := eventhub.Event{
+		OrganizationID:      "default",
+		OriginatedTimestamp: time.Now(),
+		EventType:           eventType,
+		Action:              action,
+		EntityID:            entityID,
+		CorrelationID:       correlationID,
+		EventData:           fmt.Sprintf(`{"entity_id":"%s","action":"%s"}`, entityID, action),
+	}
+
+	if err := s.eventHub.PublishEvent("default", event); err != nil {
+		logger.Warn("Failed to publish event to event hub",
+			slog.String("event_type", string(eventType)),
+			slog.String("action", action),
+			slog.String("entity_id", entityID),
+			slog.Any("error", err))
+	} else {
+		logger.Debug("Published event to event hub",
+			slog.String("event_type", string(eventType)),
+			slog.String("action", action),
+			slog.String("entity_id", entityID))
+	}
+}
+
+func (s *APIKeyService) getExistingAPIKeyForCreate(apiId string, request *api.APIKeyCreationRequest) (*models.APIKey, error) {
+	if s.db == nil || request == nil || request.ApiKey == nil {
+		return nil, nil
+	}
+
+	providedKey := strings.TrimSpace(*request.ApiKey)
+	if providedKey == "" {
+		return nil, nil
+	}
+
+	hashedAPIKey, err := s.hashAPIKey(providedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	existingAPIKey, err := s.db.GetAPIKeyByKey(hashedAPIKey)
+	if err != nil {
+		if storage.IsNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	if existingAPIKey.APIId != apiId {
+		return nil, nil
+	}
+
+	if request.Name != nil {
+		requestedName := strings.TrimSpace(*request.Name)
+		if requestedName != "" && existingAPIKey.Name != requestedName {
+			return nil, nil
+		}
+	}
+
+	return existingAPIKey, nil
+}
 
 // CreateAPIKey handles the complete API key creation process.
 // Supports both local key generation by generating a new random key and external key injection
@@ -173,7 +254,7 @@ func (s *APIKeyService) CreateAPIKey(params APIKeyCreationParams) (*APIKeyCreati
 	}
 
 	// Validate that API exists
-	config, err := s.store.GetByHandle(params.Handle)
+	config, err := s.getAPIConfigByHandle(params.Handle)
 	if err != nil {
 		logger.Error("API configuration not found for API Key generation",
 			slog.String("operation", operationType+"_key"),
@@ -181,8 +262,40 @@ func (s *APIKeyService) CreateAPIKey(params APIKeyCreationParams) (*APIKeyCreati
 		return nil, fmt.Errorf("API configuration handle '%s' not found", params.Handle)
 	}
 
+	result := &APIKeyCreationResult{
+		IsRetry: false,
+	}
+
+	var apiKey *models.APIKey
+	if isExternalKeyInjection {
+		existingAPIKey, lookupErr := s.getExistingAPIKeyForCreate(config.ID, &params.Request)
+		if lookupErr != nil {
+			logger.Debug("Failed to check existing API key for idempotency",
+				slog.String("operation", operationType+"_key"),
+				slog.Any("error", lookupErr))
+		} else if existingAPIKey != nil {
+			apiKey = existingAPIKey
+			logger.Debug("Reusing existing API key for duplicate create request",
+				slog.String("name", apiKey.Name),
+				slog.String("operation", operationType+"_key"))
+			result.Response = s.buildAPIKeyResponse(apiKey, params.Handle, apiKey.APIKey, isExternalKeyInjection)
+			return result, nil
+		}
+	}
+
 	// Check API key limit enforcement
 	if err := s.enforceAPIKeyLimit(config.ID, user.UserID, logger); err != nil {
+		if isExternalKeyInjection {
+			existingAPIKey, lookupErr := s.getExistingAPIKeyForCreate(config.ID, &params.Request)
+			if lookupErr != nil && existingAPIKey != nil {
+				apiKey = existingAPIKey
+				logger.Debug("Reusing existing API key for duplicate create request after limit enforcement",
+					slog.String("name", apiKey.Name),
+					slog.String("operation", operationType+"_key"))
+				result.Response = s.buildAPIKeyResponse(apiKey, params.Handle, apiKey.APIKey, isExternalKeyInjection)
+				return result, nil
+			}
+		}
 		logger.Warn("API key generation limit exceeded",
 			slog.String("api_id", config.ID),
 			slog.String("operation", operationType+"_key"),
@@ -190,13 +303,9 @@ func (s *APIKeyService) CreateAPIKey(params APIKeyCreationParams) (*APIKeyCreati
 		return nil, err
 	}
 
-	result := &APIKeyCreationResult{
-		IsRetry: false,
-	}
-
 	// Create the API key from request (generate new or register external)
 	// For local keys, retry once if duplicate is detected during generation
-	apiKey, err := s.createAPIKeyFromRequest(params.Handle, &params.Request, user.UserID, config)
+	apiKey, err = s.createAPIKeyFromRequest(params.Handle, &params.Request, user.UserID, config)
 	if err != nil {
 		logger.Error("Failed to generate API key",
 			slog.Any("error", err),
@@ -209,6 +318,7 @@ func (s *APIKeyService) CreateAPIKey(params APIKeyCreationParams) (*APIKeyCreati
 	if s.db != nil {
 		if err := s.db.SaveAPIKey(apiKey); err != nil {
 			if errors.Is(err, storage.ErrConflict) {
+				// TODO: (VirajSalaka) Handle Idempotency when Control Plane is connected
 				// Handle collision - only retry for locally generated keys
 				if isExternalKeyInjection {
 					// For external keys, collision means the key already exists
@@ -251,49 +361,7 @@ func (s *APIKeyService) CreateAPIKey(params APIKeyCreationParams) (*APIKeyCreati
 	plainAPIKey := apiKey.PlainAPIKey // Store plain API key for response
 	apiKey.PlainAPIKey = ""           // Clear plain API key from the struct for security
 
-	// Store the API key in the ConfigStore (for both generated and registered keys)
-	if err := s.store.StoreAPIKey(apiKey); err != nil {
-		logger.Error("Failed to store API key in ConfigStore",
-			slog.Any("error", err),
-			slog.String("operation", operationType+"_key"))
-
-		// Rollback database save to maintain consistency
-		if s.db != nil {
-			if delErr := s.db.RemoveAPIKeyAPIAndName(apiKey.APIId, apiKey.Name); delErr != nil {
-				logger.Error("Failed to rollback API key from database",
-					slog.Any("error", delErr),
-					slog.String("correlation_id", params.CorrelationID))
-			}
-		}
-		return nil, fmt.Errorf("failed to store API key in ConfigStore: %w", err)
-	}
-
-	apiConfig, err := config.Configuration.Spec.AsAPIConfigData()
-	if err != nil {
-		logger.Error("Failed to parse API configuration data",
-			slog.Any("error", err))
-		return nil, fmt.Errorf("failed to parse API configuration data: %w", err)
-	}
-
-	apiId := config.ID
-	apiName := apiConfig.DisplayName
-	apiVersion := apiConfig.Version
-	logger.Info("Storing API key in policy engine",
-		slog.String("name", apiKey.Name),
-		slog.String("api_name", apiName),
-		slog.String("api_version", apiVersion),
-		slog.String("operation", operationType+"_key"))
-
-	// Send the API key to the policy engine via xDS
-	if s.xdsManager != nil {
-		if err := s.xdsManager.StoreAPIKey(apiId, apiName, apiVersion, apiKey, params.CorrelationID); err != nil {
-			logger.Error("Failed to send API key to policy engine",
-				slog.String("operation", operationType+"_key"),
-				slog.Any("error", err))
-			return nil, fmt.Errorf("failed to send API key to policy engine: %w", err)
-		}
-	}
-
+	s.publishEvent(eventhub.EventTypeAPIKey, "CREATE", apiKey.ID, params.CorrelationID, logger)
 	// Build response following the generated schema
 	result.Response = s.buildAPIKeyResponse(apiKey, params.Handle, plainAPIKey, isExternalKeyInjection)
 
@@ -1607,7 +1675,6 @@ func (s *APIKeyService) hashAPIKeyWithSHA256(plainAPIKey string) (string, error)
 	return hex.EncodeToString(hash), nil
 }
 
-
 // compareAPIKeys compares API keys by hashing the provided key and comparing with stored hash
 // Returns true if the plain API key matches the stored hash, false otherwise
 func (s *APIKeyService) compareAPIKeys(providedAPIKey, storedAPIKey string) bool {
@@ -1628,7 +1695,6 @@ func (s *APIKeyService) compareAPIKeys(providedAPIKey, storedAPIKey string) bool
 	// Constant-time comparison with stored hash
 	return subtle.ConstantTimeCompare([]byte(computedHash), []byte(storedAPIKey)) == 1
 }
-
 
 // SetHashingConfig allows updating the hashing configuration at runtime
 func (s *APIKeyService) SetHashingConfig(config *config.APIKeyConfig) {
@@ -1941,4 +2007,3 @@ func (s *APIKeyService) UpdateExternalAPIKeyFromEvent(
 
 	return nil
 }
-

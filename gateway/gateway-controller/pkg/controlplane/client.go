@@ -148,7 +148,7 @@ func NewClient(
 		parser:            config.NewParser(),
 		validator:         validator,
 		deploymentService: utils.NewAPIDeploymentService(store, db, validator, routerConfig, eventHub),
-		apiKeyService:     utils.NewAPIKeyService(store, db, apiKeyXDSManager, apiKeyConfig),
+		apiKeyService:     utils.NewAPIKeyService(store, db, apiKeyXDSManager, apiKeyConfig, eventHub),
 		apiKeyXDSManager:  apiKeyXDSManager,
 		routerConfig:      routerConfig,
 		policyManager:     policyManager,

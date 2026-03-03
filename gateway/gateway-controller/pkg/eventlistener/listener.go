@@ -26,10 +26,18 @@ import (
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/xds"
 )
+
+// APIKeyXDSManager defines API key xDS operations used by the listener.
+type APIKeyXDSManager interface {
+	StoreAPIKey(apiId, apiName, apiVersion string, apiKey *models.APIKey, correlationID string) error
+	RevokeAPIKey(apiId, apiName, apiVersion, apiKeyName, correlationID string) error
+	RemoveAPIKeysByAPI(apiId, apiName, apiVersion, correlationID string) error
+}
 
 // EventListener listens for events from EventHub and processes them
 // to keep the local replica synchronized with other replicas.
@@ -38,6 +46,7 @@ type EventListener struct {
 	store             *storage.ConfigStore
 	db                storage.Storage
 	snapshotManager   *xds.SnapshotManager
+	apiKeyXDSManager  APIKeyXDSManager
 	policyManager     *policyxds.PolicyManager
 	routerConfig      *config.RouterConfig
 	logger            *slog.Logger
@@ -55,6 +64,7 @@ func NewEventListener(
 	store *storage.ConfigStore,
 	db storage.Storage,
 	snapshotManager *xds.SnapshotManager,
+	apiKeyXDSManager APIKeyXDSManager,
 	policyManager *policyxds.PolicyManager,
 	routerConfig *config.RouterConfig,
 	logger *slog.Logger,
@@ -67,6 +77,7 @@ func NewEventListener(
 		store:             store,
 		db:                db,
 		snapshotManager:   snapshotManager,
+		apiKeyXDSManager:  apiKeyXDSManager,
 		policyManager:     policyManager,
 		routerConfig:      routerConfig,
 		logger:            logger,
@@ -144,6 +155,8 @@ func (l *EventListener) handleEvent(event eventhub.Event) {
 	switch event.EventType {
 	case eventhub.EventTypeAPI:
 		l.processAPIEvent(event)
+	case eventhub.EventTypeAPIKey:
+		l.processAPIKeyEvent(event)
 	case eventhub.EventTypeCertificate:
 		l.logger.Info("Certificate event received (processing not yet implemented)",
 			slog.String("entity_id", event.EntityID))

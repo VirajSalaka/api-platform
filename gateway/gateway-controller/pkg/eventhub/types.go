@@ -26,6 +26,8 @@ type EventType string
 const (
 	// EventTypeAPI represents an API configuration change event
 	EventTypeAPI EventType = "API"
+	// EventTypeAPIKey represents an API key change event
+	EventTypeAPIKey EventType = "API_KEY"
 	// EventTypeCertificate represents a certificate change event
 	EventTypeCertificate EventType = "CERTIFICATE"
 	// EventTypeLLMTemplate represents an LLM template change event
@@ -34,9 +36,9 @@ const (
 
 // Event represents a change event in the system
 type Event struct {
-	OrganizationID       string    `json:"organization_id"`
-	ProcessedTimestamp   time.Time `json:"processed_timestamp"`
-	OriginatedTimestamp  time.Time `json:"originated_timestamp"`
+	OrganizationID      string    `json:"organization_id"`
+	ProcessedTimestamp  time.Time `json:"processed_timestamp"`
+	OriginatedTimestamp time.Time `json:"originated_timestamp"`
 	EventType           EventType `json:"event_type"`
 	Action              string    `json:"action"`
 	EntityID            string    `json:"entity_id"`

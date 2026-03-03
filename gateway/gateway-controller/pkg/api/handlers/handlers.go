@@ -113,7 +113,7 @@ func NewAPIServer(
 		llmDeploymentService: utils.NewLLMDeploymentService(store, db, snapshotManager, lazyResourceManager, templateDefinitions,
 			deploymentService, &systemConfig.Router, policyVersionResolver, policyValidator),
 		apiKeyService: utils.NewAPIKeyService(store, db, apiKeyXDSManager,
-			&systemConfig.APIKey),
+			&systemConfig.APIKey, eventHubInstance),
 		apiKeyXDSManager:   apiKeyXDSManager,
 		controlPlaneClient: controlPlaneClient,
 		routerConfig:       &systemConfig.Router,
@@ -2255,7 +2255,12 @@ func (s *APIServer) CreateAPIKey(c *gin.Context, id string) {
 	result, err := s.apiKeyService.CreateAPIKey(params)
 	if err != nil {
 		// Check error type to determine appropriate status code
-		if strings.Contains(err.Error(), "not found") {
+		if storage.IsDatabaseUnavailableError(err) {
+			c.JSON(http.StatusServiceUnavailable, api.ErrorResponse{
+				Status:  "error",
+				Message: "Database storage not available",
+			})
+		} else if strings.Contains(err.Error(), "not found") {
 			c.JSON(http.StatusNotFound, api.ErrorResponse{
 				Status:  "error",
 				Message: err.Error(),
