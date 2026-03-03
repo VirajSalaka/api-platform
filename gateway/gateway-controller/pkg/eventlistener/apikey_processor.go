@@ -22,14 +22,17 @@ import (
 	"log/slog"
 
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 )
 
 // processAPIKeyEvent dispatches API key events by action.
 func (l *EventListener) processAPIKeyEvent(event eventhub.Event) {
 	switch event.Action {
-	case "CREATE":
-		l.handleAPIKeyCreate(event)
+	case "CREATE", "UPDATE", "REGENERATE":
+		l.handleAPIKeyUpsert(event)
+	case "REVOKE":
+		l.handleAPIKeyRevoke(event)
 	default:
 		l.logger.Warn("Unknown API key event action",
 			slog.String("action", event.Action),
@@ -37,11 +40,47 @@ func (l *EventListener) processAPIKeyEvent(event eventhub.Event) {
 	}
 }
 
-// handleAPIKeyCreate handles API key create events from write-path async sync.
-func (l *EventListener) handleAPIKeyCreate(event eventhub.Event) {
-	keyID := event.EntityID
+func (l *EventListener) syncAPIConfigForAPIKeyEvent(apiID string) (*models.StoredConfig, error) {
+	cfg, err := l.store.Get(apiID)
+	if err == nil {
+		return cfg, nil
+	}
 
-	l.logger.Info("Processing API key create event from another replica",
+	if l.db == nil {
+		return nil, err
+	}
+
+	cfg, err = l.db.GetConfig(apiID)
+	if err != nil {
+		return nil, err
+	}
+
+	if addErr := l.store.Add(cfg); addErr != nil {
+		if updateErr := l.store.Update(cfg); updateErr != nil {
+			l.logger.Warn("Failed to sync API config into memory store while processing API key event",
+				slog.String("api_id", apiID),
+				slog.Any("add_error", addErr),
+				slog.Any("update_error", updateErr))
+		}
+	}
+
+	return cfg, nil
+}
+
+// handleAPIKeyUpsert handles API key create/update/regenerate events from write-path async sync.
+func (l *EventListener) handleAPIKeyUpsert(event eventhub.Event) {
+	apiID, keyID, err := eventhub.ParseAPIKeyEntityID(event.EntityID)
+	if err != nil {
+		l.logger.Error("Failed to parse API key event entity ID",
+			slog.String("action", event.Action),
+			slog.String("entity_id", event.EntityID),
+			slog.Any("error", err))
+		return
+	}
+
+	l.logger.Info("Processing API key upsert event from another replica",
+		slog.String("action", event.Action),
+		slog.String("api_id", apiID),
 		slog.String("api_key_id", keyID),
 		slog.String("correlation_id", event.CorrelationID))
 
@@ -59,13 +98,16 @@ func (l *EventListener) handleAPIKeyCreate(event eventhub.Event) {
 	apiKey, err := l.db.GetAPIKeyByID(keyID)
 	if err != nil {
 		if storage.IsNotFoundError(err) {
-			l.logger.Warn("API key not found in database for create event",
+			l.logger.Warn("API key not found in database for upsert event",
+				slog.String("action", event.Action),
+				slog.String("api_id", apiID),
 				slog.String("api_key_id", keyID),
 				slog.String("correlation_id", event.CorrelationID))
 			return
 		}
 
 		l.logger.Error("Failed to fetch API key from database",
+			slog.String("api_id", apiID),
 			slog.String("api_key_id", keyID),
 			slog.Any("error", err))
 		return
@@ -86,25 +128,14 @@ func (l *EventListener) handleAPIKeyCreate(event eventhub.Event) {
 		}
 	}
 
-	cfg, err := l.store.Get(apiKey.APIId)
+	cfg, err := l.syncAPIConfigForAPIKeyEvent(apiKey.APIId)
 	if err != nil {
-		cfg, err = l.db.GetConfig(apiKey.APIId)
-		if err != nil {
-			l.logger.Error("Failed to resolve API for API key event",
-				slog.String("api_key_id", keyID),
-				slog.String("api_id", apiKey.APIId),
-				slog.Any("error", err))
-			return
-		}
-
-		if addErr := l.store.Add(cfg); addErr != nil {
-			if updateErr := l.store.Update(cfg); updateErr != nil {
-				l.logger.Warn("Failed to sync API config into memory store while processing API key event",
-					slog.String("api_id", apiKey.APIId),
-					slog.Any("add_error", addErr),
-					slog.Any("update_error", updateErr))
-			}
-		}
+		l.logger.Error("Failed to resolve API for API key event",
+			slog.String("action", event.Action),
+			slog.String("api_key_id", keyID),
+			slog.String("api_id", apiKey.APIId),
+			slog.Any("error", err))
+		return
 	}
 
 	apiConfig, err := cfg.Configuration.Spec.AsAPIConfigData()
@@ -126,7 +157,96 @@ func (l *EventListener) handleAPIKeyCreate(event eventhub.Event) {
 		}
 	}
 
-	l.logger.Info("Successfully processed API key create event from replica",
+	l.logger.Info("Successfully processed API key upsert event from replica",
+		slog.String("action", event.Action),
+		slog.String("api_id", cfg.ID),
+		slog.String("api_key_id", keyID),
+		slog.String("correlation_id", event.CorrelationID))
+}
+
+// handleAPIKeyRevoke handles API key revoke events from write-path async sync.
+func (l *EventListener) handleAPIKeyRevoke(event eventhub.Event) {
+	apiID, keyID, err := eventhub.ParseAPIKeyEntityID(event.EntityID)
+	if err != nil {
+		l.logger.Error("Failed to parse API key revoke event entity ID",
+			slog.String("entity_id", event.EntityID),
+			slog.Any("error", err))
+		return
+	}
+
+	l.logger.Info("Processing API key revoke event from another replica",
+		slog.String("api_id", apiID),
+		slog.String("api_key_id", keyID),
+		slog.String("correlation_id", event.CorrelationID))
+
+	if l.store == nil {
+		l.logger.Warn("In-memory store not available, cannot process API key revoke event",
+			slog.String("api_key_id", keyID))
+		return
+	}
+
+	var apiKeyName string
+	apiKey, err := l.store.GetAPIKeyByID(apiID, keyID)
+	if err == nil {
+		apiKeyName = apiKey.Name
+	} else if !storage.IsNotFoundError(err) {
+		l.logger.Error("Failed to load API key from memory store during revoke sync",
+			slog.String("api_key_id", keyID),
+			slog.String("api_id", apiID),
+			slog.Any("error", err))
+		return
+	}
+
+	if err := l.store.RemoveAPIKeyByID(apiID, keyID); err != nil {
+		if storage.IsNotFoundError(err) {
+			l.logger.Debug("API key already absent from memory store during revoke sync",
+				slog.String("api_key_id", keyID),
+				slog.String("api_id", apiID))
+		} else {
+			l.logger.Error("Failed to remove API key from memory store during revoke sync",
+				slog.String("api_key_id", keyID),
+				slog.String("api_id", apiID),
+				slog.Any("error", err))
+			return
+		}
+	}
+
+	if apiKeyName == "" {
+		l.logger.Warn("Skipping API key revoke xDS sync because API key name is unavailable",
+			slog.String("api_key_id", keyID),
+			slog.String("api_id", apiID))
+		return
+	}
+
+	cfg, err := l.syncAPIConfigForAPIKeyEvent(apiID)
+	if err != nil {
+		l.logger.Error("Failed to resolve API for API key revoke event",
+			slog.String("api_key_id", keyID),
+			slog.String("api_id", apiID),
+			slog.Any("error", err))
+		return
+	}
+
+	apiConfig, err := cfg.Configuration.Spec.AsAPIConfigData()
+	if err != nil {
+		l.logger.Error("Failed to parse API configuration for API key revoke xDS update",
+			slog.String("api_id", cfg.ID),
+			slog.String("api_key_id", keyID),
+			slog.Any("error", err))
+		return
+	}
+
+	if l.apiKeyXDSManager != nil {
+		if err := l.apiKeyXDSManager.RevokeAPIKey(cfg.ID, apiConfig.DisplayName, apiConfig.Version, apiKeyName, event.CorrelationID); err != nil {
+			l.logger.Error("Failed to revoke API key in policy engine after replica sync",
+				slog.String("api_id", cfg.ID),
+				slog.String("api_key_id", keyID),
+				slog.Any("error", err))
+			return
+		}
+	}
+
+	l.logger.Info("Successfully processed API key revoke event from replica",
 		slog.String("api_id", cfg.ID),
 		slog.String("api_key_id", keyID),
 		slog.String("correlation_id", event.CorrelationID))
