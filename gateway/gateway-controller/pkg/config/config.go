@@ -110,7 +110,15 @@ type Controller struct {
 
 // EventHubConfig holds controller event hub configuration.
 type EventHubConfig struct {
-	Storage StorageConfig `koanf:"storage"`
+	ConnectionPool ConnectionPoolConfig `koanf:"connection_pool"`
+}
+
+// ConnectionPoolConfig holds database pool overrides.
+type ConnectionPoolConfig struct {
+	MaxOpenConns    int           `koanf:"max_open_conns"`
+	MaxIdleConns    int           `koanf:"max_idle_conns"`
+	ConnMaxLifetime time.Duration `koanf:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `koanf:"conn_max_idle_time"`
 }
 
 // MetricsConfig holds Prometheus metrics server configuration
@@ -682,8 +690,8 @@ func (c *Config) Validate() error {
 	}
 
 	if c.IsPersistentMode() {
-		eventHubStorage := c.ResolvedEventHubStorage()
-		if err := validateStorageConfig(&eventHubStorage, "eventhub.storage", []string{"sqlite", "postgres"}); err != nil {
+		eventHubPool := c.ResolvedEventHubConnectionPool()
+		if err := validateConnectionPoolConfig(eventHubPool, "eventhub.connection_pool"); err != nil {
 			return err
 		}
 	}
@@ -932,63 +940,20 @@ func validateStorageConfig(cfg *StorageConfig, fieldPrefix string, validTypes []
 	return nil
 }
 
-func mergeStorageConfig(base, override StorageConfig) StorageConfig {
-	resolved := base
-	if override.Type != "" && override.Type != base.Type {
-		resolved = StorageConfig{}
+func validateConnectionPoolConfig(cfg ConnectionPoolConfig, fieldPrefix string) error {
+	if cfg.MaxOpenConns < 1 {
+		return fmt.Errorf("%s.max_open_conns must be >= 1, got: %d", fieldPrefix, cfg.MaxOpenConns)
 	}
-	if override.Type != "" {
-		resolved.Type = override.Type
+	if cfg.MaxIdleConns < 0 {
+		return fmt.Errorf("%s.max_idle_conns must be >= 0, got: %d", fieldPrefix, cfg.MaxIdleConns)
 	}
-	if override.SQLite.Path != "" {
-		resolved.SQLite.Path = override.SQLite.Path
+	if cfg.ConnMaxLifetime < 0 {
+		return fmt.Errorf("%s.conn_max_lifetime must be >= 0, got: %s", fieldPrefix, cfg.ConnMaxLifetime)
 	}
-	resolved.Postgres = mergePostgresConfig(resolved.Postgres, override.Postgres)
-	return resolved
-}
-
-func mergePostgresConfig(base, override PostgresConfig) PostgresConfig {
-	resolved := base
-	if override.DSN != "" {
-		resolved.DSN = override.DSN
+	if cfg.ConnMaxIdleTime < 0 {
+		return fmt.Errorf("%s.conn_max_idle_time must be >= 0, got: %s", fieldPrefix, cfg.ConnMaxIdleTime)
 	}
-	if override.Host != "" {
-		resolved.Host = override.Host
-	}
-	if override.Port != 0 {
-		resolved.Port = override.Port
-	}
-	if override.Database != "" {
-		resolved.Database = override.Database
-	}
-	if override.User != "" {
-		resolved.User = override.User
-	}
-	if override.Password != "" {
-		resolved.Password = override.Password
-	}
-	if override.SSLMode != "" {
-		resolved.SSLMode = override.SSLMode
-	}
-	if override.ConnectTimeout != 0 {
-		resolved.ConnectTimeout = override.ConnectTimeout
-	}
-	if override.MaxOpenConns != 0 {
-		resolved.MaxOpenConns = override.MaxOpenConns
-	}
-	if override.MaxIdleConns != 0 {
-		resolved.MaxIdleConns = override.MaxIdleConns
-	}
-	if override.ConnMaxLifetime != 0 {
-		resolved.ConnMaxLifetime = override.ConnMaxLifetime
-	}
-	if override.ConnMaxIdleTime != 0 {
-		resolved.ConnMaxIdleTime = override.ConnMaxIdleTime
-	}
-	if override.ApplicationName != "" {
-		resolved.ApplicationName = override.ApplicationName
-	}
-	return resolved
+	return nil
 }
 
 func (c *Config) validateEventGatewayConfig() error {
@@ -1484,10 +1449,43 @@ func (c *Config) IsPersistentMode() bool {
 	return c.Controller.Storage.Type != "memory"
 }
 
-// ResolvedEventHubStorage returns the storage configuration intended for EventHub.
-// When controller.eventhub.storage is omitted, it inherits the main controller storage settings.
-func (c *Config) ResolvedEventHubStorage() StorageConfig {
-	return mergeStorageConfig(c.Controller.Storage, c.Controller.EventHub.Storage)
+// ResolvedEventHubConnectionPool returns the EventHub pool settings after inheriting
+// defaults from the main storage configuration.
+func (c *Config) ResolvedEventHubConnectionPool() ConnectionPoolConfig {
+	var resolved ConnectionPoolConfig
+	if c.Controller.Storage.Type == "postgres" {
+		resolved = ConnectionPoolConfig{
+			MaxOpenConns:    c.Controller.Storage.Postgres.MaxOpenConns,
+			MaxIdleConns:    c.Controller.Storage.Postgres.MaxIdleConns,
+			ConnMaxLifetime: c.Controller.Storage.Postgres.ConnMaxLifetime,
+			ConnMaxIdleTime: c.Controller.Storage.Postgres.ConnMaxIdleTime,
+		}
+	} else {
+		resolved = ConnectionPoolConfig{
+			MaxOpenConns: 1,
+			MaxIdleConns: 1,
+		}
+	}
+
+	override := c.Controller.EventHub.ConnectionPool
+	if override.MaxOpenConns != 0 {
+		resolved.MaxOpenConns = override.MaxOpenConns
+	}
+	if override.MaxIdleConns != 0 {
+		resolved.MaxIdleConns = override.MaxIdleConns
+	}
+	if override.ConnMaxLifetime != 0 {
+		resolved.ConnMaxLifetime = override.ConnMaxLifetime
+	}
+	if override.ConnMaxIdleTime != 0 {
+		resolved.ConnMaxIdleTime = override.ConnMaxIdleTime
+	}
+
+	if resolved.MaxOpenConns > 0 && resolved.MaxIdleConns > resolved.MaxOpenConns {
+		resolved.MaxIdleConns = resolved.MaxOpenConns
+	}
+
+	return resolved
 }
 
 // IsMemoryOnlyMode returns true if storage type is memory

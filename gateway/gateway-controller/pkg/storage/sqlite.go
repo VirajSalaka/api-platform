@@ -49,7 +49,7 @@ type SQLiteStorage struct {
 }
 
 // newSQLiteStorage creates a new SQLite storage instance.
-func newSQLiteStorage(dbPath string, logger *slog.Logger) (*SQLiteStorage, error) {
+func newSQLiteStorage(dbPath string, poolCfg ConnectionPoolConfig, logger *slog.Logger) (*SQLiteStorage, error) {
 	// Build connection string with SQLite pragmas for optimal performance
 	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_cache_size=2000&_foreign_keys=ON", dbPath)
 
@@ -58,10 +58,26 @@ func newSQLiteStorage(dbPath string, logger *slog.Logger) (*SQLiteStorage, error
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// CRITICAL: Prevents "database is locked" errors with concurrent access
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
+	if poolCfg.MaxOpenConns == 0 {
+		poolCfg.MaxOpenConns = 1
+	}
+	if poolCfg.MaxIdleConns == 0 {
+		poolCfg.MaxIdleConns = 1
+	}
+	if poolCfg.MaxOpenConns < 1 {
+		poolCfg.MaxOpenConns = 1
+	}
+	if poolCfg.MaxIdleConns < 0 {
+		poolCfg.MaxIdleConns = 0
+	}
+	if poolCfg.MaxIdleConns > poolCfg.MaxOpenConns {
+		poolCfg.MaxIdleConns = poolCfg.MaxOpenConns
+	}
+
+	db.SetMaxOpenConns(poolCfg.MaxOpenConns)
+	db.SetMaxIdleConns(poolCfg.MaxIdleConns)
+	db.SetConnMaxLifetime(poolCfg.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(poolCfg.ConnMaxIdleTime)
 
 	storage := &SQLiteStorage{
 		db:     db,
@@ -76,7 +92,11 @@ func newSQLiteStorage(dbPath string, logger *slog.Logger) (*SQLiteStorage, error
 
 	logger.Info("SQLite storage initialized",
 		slog.String("database_path", dbPath),
-		slog.String("journal_mode", "WAL"))
+		slog.String("journal_mode", "WAL"),
+		slog.Int("max_open_conns", poolCfg.MaxOpenConns),
+		slog.Int("max_idle_conns", poolCfg.MaxIdleConns),
+		slog.Duration("conn_max_lifetime", poolCfg.ConnMaxLifetime),
+		slog.Duration("conn_max_idle_time", poolCfg.ConnMaxIdleTime))
 
 	return storage, nil
 }

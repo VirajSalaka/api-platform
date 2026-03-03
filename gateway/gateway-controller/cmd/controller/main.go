@@ -43,8 +43,21 @@ var (
 	BuildDate = "unknown"
 )
 
-func toBackendConfig(storageCfg config.StorageConfig, gatewayID string) storage.BackendConfig {
+func toBackendConfig(storageCfg config.StorageConfig, gatewayID string, poolCfg config.ConnectionPoolConfig) storage.BackendConfig {
 	pg := storageCfg.Postgres
+	if poolCfg.MaxOpenConns != 0 {
+		pg.MaxOpenConns = poolCfg.MaxOpenConns
+	}
+	if poolCfg.MaxIdleConns != 0 {
+		pg.MaxIdleConns = poolCfg.MaxIdleConns
+	}
+	if poolCfg.ConnMaxLifetime != 0 {
+		pg.ConnMaxLifetime = poolCfg.ConnMaxLifetime
+	}
+	if poolCfg.ConnMaxIdleTime != 0 {
+		pg.ConnMaxIdleTime = poolCfg.ConnMaxIdleTime
+	}
+
 	return storage.BackendConfig{
 		Type:       storageCfg.Type,
 		SQLitePath: storageCfg.SQLite.Path,
@@ -62,6 +75,12 @@ func toBackendConfig(storageCfg config.StorageConfig, gatewayID string) storage.
 			ConnMaxLifetime: pg.ConnMaxLifetime,
 			ConnMaxIdleTime: pg.ConnMaxIdleTime,
 			ApplicationName: pg.ApplicationName,
+		},
+		Pool: storage.ConnectionPoolConfig{
+			MaxOpenConns:    poolCfg.MaxOpenConns,
+			MaxIdleConns:    poolCfg.MaxIdleConns,
+			ConnMaxLifetime: poolCfg.ConnMaxLifetime,
+			ConnMaxIdleTime: poolCfg.ConnMaxIdleTime,
 		},
 		GatewayID: gatewayID,
 	}
@@ -115,7 +134,7 @@ func main() {
 	// Initialize storage based on type
 	var db storage.Storage
 	if cfg.IsPersistentMode() {
-		db, err = storage.NewStorage(toBackendConfig(cfg.Controller.Storage, cfg.Controller.Server.GatewayID), log)
+		db, err = storage.NewStorage(toBackendConfig(cfg.Controller.Storage, cfg.Controller.Server.GatewayID, config.ConnectionPoolConfig{}), log)
 		if err != nil {
 			if strings.EqualFold(cfg.Controller.Storage.Type, "sqlite") && errors.Is(err, storage.ErrDatabaseLocked) {
 				log.Error("Database is locked by another process",
@@ -315,20 +334,24 @@ func main() {
 	var eventHubStorage storage.Storage
 	var evtListener *eventlistener.EventListener
 	if cfg.IsPersistentMode() {
-		eventHubStorageCfg := cfg.ResolvedEventHubStorage()
+		eventHubPoolCfg := cfg.ResolvedEventHubConnectionPool()
 		log.Info("Initializing EventHub for multi-replica synchronization",
-			slog.String("storage_type", eventHubStorageCfg.Type))
+			slog.String("storage_type", cfg.Controller.Storage.Type),
+			slog.Int("max_open_conns", eventHubPoolCfg.MaxOpenConns),
+			slog.Int("max_idle_conns", eventHubPoolCfg.MaxIdleConns),
+			slog.Duration("conn_max_lifetime", eventHubPoolCfg.ConnMaxLifetime),
+			slog.Duration("conn_max_idle_time", eventHubPoolCfg.ConnMaxIdleTime))
 
-		eventHubStorage, err = storage.NewStorage(toBackendConfig(eventHubStorageCfg, cfg.Controller.Server.GatewayID), log)
+		eventHubStorage, err = storage.NewStorage(toBackendConfig(cfg.Controller.Storage, cfg.Controller.Server.GatewayID, eventHubPoolCfg), log)
 		if err != nil {
-			if strings.EqualFold(eventHubStorageCfg.Type, "sqlite") && errors.Is(err, storage.ErrDatabaseLocked) {
+			if strings.EqualFold(cfg.Controller.Storage.Type, "sqlite") && errors.Is(err, storage.ErrDatabaseLocked) {
 				log.Error("EventHub database is locked by another process",
-					slog.String("database_path", eventHubStorageCfg.SQLite.Path),
+					slog.String("database_path", cfg.Controller.Storage.SQLite.Path),
 					slog.String("troubleshooting", "Check if another process is using the configured EventHub database or remove stale WAL files"))
 				os.Exit(1)
 			}
 			log.Error("Failed to initialize EventHub storage",
-				slog.String("type", eventHubStorageCfg.Type),
+				slog.String("type", cfg.Controller.Storage.Type),
 				slog.Any("error", err))
 			os.Exit(1)
 		}

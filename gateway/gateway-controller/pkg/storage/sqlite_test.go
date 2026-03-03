@@ -63,6 +63,26 @@ func TestNewSQLiteStorage_InvalidPath(t *testing.T) {
 	assert.Assert(t, err != nil)
 }
 
+func TestNewSQLiteStorage_CustomPoolConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test-pool.db")
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	store, err := NewStorage(BackendConfig{
+		Type:       "sqlite",
+		SQLitePath: dbPath,
+		Pool: ConnectionPoolConfig{
+			MaxOpenConns: 2,
+			MaxIdleConns: 2,
+		},
+	}, logger)
+	assert.NilError(t, err)
+	storage := store.(*sqlStore)
+	defer storage.db.Close()
+
+	assert.Equal(t, storage.db.Stats().MaxOpenConnections, 2)
+}
+
 func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test_schema.db")
