@@ -850,10 +850,9 @@ func (s *APIServer) DeleteAPI(c *gin.Context, id string) {
 	}
 	correlationID := middleware.GetCorrelationID(c)
 	result, err := s.deploymentService.DeleteAPIConfiguration(utils.APIDeletionParams{
-		Handle:           handle,
-		CorrelationID:    correlationID,
-		Logger:           log,
-		APIKeyXDSManager: s.apiKeyXDSManager,
+		Handle:        handle,
+		CorrelationID: correlationID,
+		Logger:        log,
 	})
 	if err != nil {
 		if storage.IsDatabaseUnavailableError(err) {

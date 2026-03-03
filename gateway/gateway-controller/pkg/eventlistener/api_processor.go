@@ -44,6 +44,23 @@ func (l *EventListener) processAPIEvent(event eventhub.Event) {
 	}
 }
 
+func (l *EventListener) updateSnapshotAsync(entityID, correlationID, failureMessage string) {
+	if l.snapshotManager == nil {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := l.snapshotManager.UpdateSnapshot(ctx, correlationID); err != nil {
+			l.logger.Error(failureMessage,
+				slog.String("api_id", entityID),
+				slog.Any("error", err))
+		}
+	}()
+}
+
 // handleAPICreateOrUpdate handles API create or update events from other replicas
 func (l *EventListener) handleAPICreateOrUpdate(event eventhub.Event) {
 	entityID := event.EntityID
@@ -89,17 +106,7 @@ func (l *EventListener) handleAPICreateOrUpdate(event eventhub.Event) {
 	}
 
 	// Update xDS snapshot
-	go func() {
-		// TODO: (VirajSalaka) Context Timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		if err := l.snapshotManager.UpdateSnapshot(ctx, event.CorrelationID); err != nil {
-			l.logger.Error("Failed to update xDS snapshot after replica sync",
-				slog.String("api_id", entityID),
-				slog.Any("error", err))
-		}
-	}()
+	l.updateSnapshotAsync(entityID, event.CorrelationID, "Failed to update xDS snapshot after replica sync")
 
 	// TODO: (VirajSalaka) Introduce an error group and have a proper rollback mechanism.
 
@@ -119,6 +126,14 @@ func (l *EventListener) handleAPIDelete(event eventhub.Event) {
 		slog.String("api_id", entityID),
 		slog.String("correlation_id", event.CorrelationID))
 
+	existingConfig, err := l.store.Get(entityID)
+	if err != nil && !storage.IsNotFoundError(err) {
+		l.logger.Error("Failed to load API from memory store before deletion",
+			slog.String("api_id", entityID),
+			slog.Any("error", err))
+		return
+	}
+
 	// Remove from in-memory store
 	if err := l.store.Delete(entityID); err != nil {
 		if !storage.IsNotFoundError(err) {
@@ -128,17 +143,30 @@ func (l *EventListener) handleAPIDelete(event eventhub.Event) {
 		}
 	}
 
-	// Update xDS snapshot
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	if err := l.store.RemoveAPIKeysByAPI(entityID); err != nil && !storage.IsNotFoundError(err) {
+		l.logger.Warn("Failed to remove API keys from memory store after API deletion",
+			slog.String("api_id", entityID),
+			slog.Any("error", err))
+	}
 
-		if err := l.snapshotManager.UpdateSnapshot(ctx, event.CorrelationID); err != nil {
-			l.logger.Error("Failed to update xDS snapshot after API deletion",
+	if existingConfig != nil && existingConfig.Configuration.Kind == api.RestApi && l.apiKeyXDSManager != nil {
+		apiConfig, err := existingConfig.Configuration.Spec.AsAPIConfigData()
+		if err != nil {
+			l.logger.Warn("Failed to parse API configuration for API key xDS cleanup",
 				slog.String("api_id", entityID),
 				slog.Any("error", err))
+		} else if err := l.apiKeyXDSManager.RemoveAPIKeysByAPI(entityID, apiConfig.DisplayName, apiConfig.Version, event.CorrelationID); err != nil {
+			l.logger.Warn("Failed to remove API keys from policy engine after API deletion",
+				slog.String("api_id", entityID),
+				slog.String("api_name", apiConfig.DisplayName),
+				slog.String("api_version", apiConfig.Version),
+				slog.String("correlation_id", event.CorrelationID),
+				slog.Any("error", err))
 		}
-	}()
+	}
+
+	// Update xDS snapshot
+	l.updateSnapshotAsync(entityID, event.CorrelationID, "Failed to update xDS snapshot after API deletion")
 
 	// Remove policies
 	if l.policyManager != nil {

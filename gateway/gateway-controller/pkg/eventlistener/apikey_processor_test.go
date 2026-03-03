@@ -38,6 +38,7 @@ import (
 type mockAPIKeyXDSManager struct {
 	calls       []storeCall
 	revokeCalls []revokeCall
+	removeCalls []removeCall
 }
 
 type storeCall struct {
@@ -53,6 +54,13 @@ type revokeCall struct {
 	apiName       string
 	apiVersion    string
 	apiKeyName    string
+	correlationID string
+}
+
+type removeCall struct {
+	apiID         string
+	apiName       string
+	apiVersion    string
 	correlationID string
 }
 
@@ -79,6 +87,12 @@ func (m *mockAPIKeyXDSManager) RevokeAPIKey(apiId, apiName, apiVersion, apiKeyNa
 }
 
 func (m *mockAPIKeyXDSManager) RemoveAPIKeysByAPI(apiId, apiName, apiVersion, correlationID string) error {
+	m.removeCalls = append(m.removeCalls, removeCall{
+		apiID:         apiId,
+		apiName:       apiName,
+		apiVersion:    apiVersion,
+		correlationID: correlationID,
+	})
 	return nil
 }
 

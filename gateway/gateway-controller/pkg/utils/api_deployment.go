@@ -54,10 +54,9 @@ type APIDeploymentResult struct {
 
 // APIDeletionParams contains parameters for API deletion operations
 type APIDeletionParams struct {
-	Handle           string // API handle (metadata.name)
-	CorrelationID    string // Correlation ID for tracking
-	Logger           *slog.Logger
-	APIKeyXDSManager XDSManager
+	Handle        string // API handle (metadata.name)
+	CorrelationID string // Correlation ID for tracking
+	Logger        *slog.Logger
 }
 
 // APIDeletionResult contains the result of API deletion
@@ -393,31 +392,6 @@ func (s *APIDeploymentService) DeleteAPIConfiguration(params APIDeletionParams) 
 		logger.Warn("Failed to remove API keys from database",
 			slog.String("handle", params.Handle),
 			slog.Any("error", err))
-	}
-
-	// Remove API keys from policy engine xDS state (best effort)
-	if params.APIKeyXDSManager != nil && cfg.Configuration.Kind == api.RestApi {
-		apiConfig, err := cfg.Configuration.Spec.AsAPIConfigData()
-		if err != nil {
-			logger.Warn("Failed to extract API config data for API key removal",
-				slog.String("handle", params.Handle),
-				slog.Any("error", err))
-		} else if err := params.APIKeyXDSManager.RemoveAPIKeysByAPI(cfg.ID, apiConfig.DisplayName, apiConfig.Version, params.CorrelationID); err != nil {
-			logger.Warn("Failed to remove API keys from policy engine",
-				slog.String("api_id", cfg.ID),
-				slog.String("handle", params.Handle),
-				slog.String("api_name", apiConfig.DisplayName),
-				slog.String("api_version", apiConfig.Version),
-				slog.String("correlation_id", params.CorrelationID),
-				slog.Any("error", err))
-		} else {
-			logger.Info("Successfully removed API keys from policy engine",
-				slog.String("api_id", cfg.ID),
-				slog.String("handle", params.Handle),
-				slog.String("api_name", apiConfig.DisplayName),
-				slog.String("api_version", apiConfig.Version),
-				slog.String("correlation_id", params.CorrelationID))
-		}
 	}
 
 	var deletionErr error
