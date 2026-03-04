@@ -740,15 +740,9 @@ func (c *Client) handleAPIDeployedEvent(event map[string]interface{}) {
 	)
 
 	// Fetch API definition and deploy
-	result, err := c.fetchAndDeployAPI(apiID, deployedEvent.CorrelationID)
+	_, err = c.fetchAndDeployAPI(apiID, deployedEvent.CorrelationID)
 	if err != nil {
 		// Error already logged in fetchAndDeployAPI
-		return
-	}
-
-	// Update policy engine xDS snapshot (best-effort)
-	if err := c.updatePolicyForDeployment(apiID, deployedEvent.CorrelationID, result); err != nil {
-		// Error already logged in updatePolicyForDeployment
 		return
 	}
 
