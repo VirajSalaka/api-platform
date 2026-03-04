@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/jmoiron/sqlx"
 )
 
 const (
@@ -40,9 +42,10 @@ const (
 
 // SQLBackend implements EventhubImpl using SQL polling
 type SQLBackend struct {
-	db     *sql.DB
-	logger *slog.Logger
-	config SQLBackendConfig
+	db       *sql.DB
+	logger   *slog.Logger
+	config   SQLBackendConfig
+	bindType int
 
 	registry *organizationRegistry
 
@@ -84,10 +87,28 @@ func NewSQLBackend(db *sql.DB, logger *slog.Logger, config SQLBackendConfig) *SQ
 		db:       db,
 		logger:   logger,
 		config:   config,
+		bindType: bindTypeForDB(db),
 		registry: newOrganizationRegistry(),
 		ctx:      ctx,
 		cancel:   cancel,
 	}
+}
+
+func bindTypeForDB(db *sql.DB) int {
+	if db == nil {
+		return sqlx.QUESTION
+	}
+
+	switch db.Driver().(type) {
+	case *stdlib.Driver:
+		return sqlx.DOLLAR
+	default:
+		return sqlx.QUESTION
+	}
+}
+
+func (b *SQLBackend) rebind(query string) string {
+	return sqlx.Rebind(b.bindType, query)
 }
 
 // Initialize prepares statements and starts background goroutines
@@ -138,59 +159,59 @@ func (b *SQLBackend) prepareStatements() (err error) {
 		}
 	}()
 
-	b.insertEventStmt, err = b.db.Prepare(`
+	b.insertEventStmt, err = b.db.Prepare(b.rebind(`
 		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, event_type, action, entity_id, correlation_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`)
+	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert event statement: %w", err)
 	}
 
-	b.updateOrgVersionStmt, err = b.db.Prepare(`
+	b.updateOrgVersionStmt, err = b.db.Prepare(b.rebind(`
 		UPDATE organization_states SET version_id = ?, updated_at = CURRENT_TIMESTAMP WHERE organization = ?
-	`)
+	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare update org version statement: %w", err)
 	}
 
-	b.getOrgStateStmt, err = b.db.Prepare(`
+	b.getOrgStateStmt, err = b.db.Prepare(b.rebind(`
 		SELECT organization, version_id, updated_at FROM organization_states WHERE organization = ?
-	`)
+	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare get org state statement: %w", err)
 	}
 
-	b.getOrgStatesPageStmt, err = b.db.Prepare(`
+	b.getOrgStatesPageStmt, err = b.db.Prepare(b.rebind(`
 		SELECT organization, version_id, updated_at
 		FROM organization_states
 		WHERE organization > ?
 		ORDER BY organization ASC
 		LIMIT ?
-	`)
+	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare get org states page statement: %w", err)
 	}
 
-	b.getEventsStmt, err = b.db.Prepare(`
+	b.getEventsStmt, err = b.db.Prepare(b.rebind(`
 		SELECT organization_id, processed_timestamp, originated_timestamp, event_type, action, entity_id, correlation_id, event_data
 		FROM events
 		WHERE organization_id = ? AND processed_timestamp > ?
 		ORDER BY processed_timestamp ASC
-	`)
+	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare get events statement: %w", err)
 	}
 
-	b.insertOrgStmt, err = b.db.Prepare(`
+	b.insertOrgStmt, err = b.db.Prepare(b.rebind(`
 		INSERT INTO organization_states (organization, version_id) VALUES (?, '')
-	`)
+	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert org statement: %w", err)
 	}
 
-	b.cleanupEventsStmt, err = b.db.Prepare(`
+	b.cleanupEventsStmt, err = b.db.Prepare(b.rebind(`
 		DELETE FROM events WHERE processed_timestamp < ?
-	`)
+	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare cleanup events statement: %w", err)
 	}
@@ -546,7 +567,7 @@ func (b *SQLBackend) Cleanup(retentionPeriod time.Duration) error {
 // CleanupRange removes events for an organization before a given time
 func (b *SQLBackend) CleanupRange(orgID string, before time.Time) error {
 	_, err := b.db.Exec(
-		"DELETE FROM events WHERE organization_id = ? AND processed_timestamp < ?",
+		b.rebind("DELETE FROM events WHERE organization_id = ? AND processed_timestamp < ?"),
 		orgID, before,
 	)
 	if err != nil {
