@@ -203,7 +203,7 @@ func (s *APIKeyService) publishAPIKeyEvent(action, entityID, correlationID strin
 		Action:              action,
 		EntityID:            entityID,
 		CorrelationID:       correlationID,
-		EventData:           fmt.Sprintf(`{"entity_id":"%s","action":"%s"}`, entityID, action),
+		EventData:           eventhub.EmptyEventData,
 	}
 
 	if err := s.eventHub.PublishEvent("default", event); err != nil {

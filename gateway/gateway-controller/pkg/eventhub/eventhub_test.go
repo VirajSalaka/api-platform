@@ -187,6 +187,31 @@ func TestAtomicPublish(t *testing.T) {
 	assert.NotEmpty(t, versionID)
 }
 
+func TestPublishDefaultsEmptyEventData(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	hub := New(db, logger, DefaultConfig())
+	require.NoError(t, hub.Initialize())
+	defer hub.Close()
+
+	require.NoError(t, hub.RegisterOrganization("test-org"))
+
+	event := Event{
+		OriginatedTimestamp: time.Now(),
+		EventType:           EventTypeAPI,
+		Action:              "UPDATE",
+		EntityID:            "api-default-eventdata",
+		EventData:           "   ",
+	}
+	require.NoError(t, hub.PublishEvent("test-org", event))
+
+	var storedEventData string
+	err := db.QueryRow("SELECT event_data FROM events WHERE organization_id = ? AND entity_id = ?", "test-org", "api-default-eventdata").Scan(&storedEventData)
+	require.NoError(t, err)
+	assert.Equal(t, EmptyEventData, storedEventData)
+}
+
 func TestMultipleSubscribers(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()

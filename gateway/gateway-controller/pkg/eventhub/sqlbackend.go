@@ -23,6 +23,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -247,6 +248,10 @@ func (b *SQLBackend) RegisterOrganization(orgID string) error {
 // Publish publishes an event atomically (insert event + update org version)
 func (b *SQLBackend) Publish(orgID string, event Event) error {
 	newVersion := uuid.New().String()
+	eventData := strings.TrimSpace(event.EventData)
+	if eventData == "" {
+		eventData = EmptyEventData
+	}
 
 	tx, err := b.db.BeginTx(b.ctx, nil)
 	if err != nil {
@@ -267,7 +272,7 @@ func (b *SQLBackend) Publish(orgID string, event Event) error {
 		event.Action,
 		event.EntityID,
 		event.CorrelationID,
-		event.EventData,
+		eventData,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert event: %w", err)

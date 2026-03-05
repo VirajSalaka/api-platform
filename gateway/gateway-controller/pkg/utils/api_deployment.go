@@ -129,7 +129,7 @@ func (s *APIDeploymentService) publishEvent(eventType eventhub.EventType, action
 		Action:              action,
 		EntityID:            entityID,
 		CorrelationID:       correlationID,
-		EventData:           fmt.Sprintf(`{"entity_id":"%s","action":"%s"}`, entityID, action),
+		EventData:           eventhub.EmptyEventData,
 	}
 
 	if err := s.eventHub.PublishEvent("default", event); err != nil {

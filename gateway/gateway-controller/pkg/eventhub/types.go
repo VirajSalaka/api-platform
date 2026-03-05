@@ -32,6 +32,10 @@ const (
 	EventTypeCertificate EventType = "CERTIFICATE"
 	// EventTypeLLMTemplate represents an LLM template change event
 	EventTypeLLMTemplate EventType = "LLM_TEMPLATE"
+
+	// EmptyEventData is the canonical JSON payload for events that do not
+	// require additional data beyond the top-level event fields.
+	EmptyEventData = "{}"
 )
 
 // Event represents a change event in the system
@@ -43,7 +47,9 @@ type Event struct {
 	Action              string    `json:"action"`
 	EntityID            string    `json:"entity_id"`
 	CorrelationID       string    `json:"correlation_id"`
-	EventData           string    `json:"event_data"`
+	// EventData carries optional event-specific details that are not already
+	// represented by top-level fields such as Action and EntityID.
+	EventData string `json:"event_data"`
 }
 
 // OrganizationState tracks the version state of an organization
