@@ -134,7 +134,7 @@ func (s *APIServer) handleStatusUpdate(configID string, success bool, version in
 		log = s.logger.With(slog.String("correlation_id", correlationID))
 	}
 
-	cfg, err := s.store.Get(configID)
+	cfg, err := s.db.GetConfig(configID)
 	if err != nil {
 		log.Warn("Config not found for status update", slog.String("id", configID))
 		return
@@ -142,7 +142,12 @@ func (s *APIServer) handleStatusUpdate(configID string, success bool, version in
 
 	now := time.Now()
 	if success {
-		cfg.Status = models.StatusDeployed
+		// TODO: (VirajSalaka) This needs to be properly handled via API Deployment Lifecycle state handling feature.
+		if cfg.Status == models.StatusUndeployed {
+			cfg.Status = models.StatusUndeployed
+		} else {
+			cfg.Status = models.StatusDeployed
+		}
 		cfg.DeployedAt = &now
 		cfg.DeployedVersion = version
 		log.Info("Configuration deployed successfully",

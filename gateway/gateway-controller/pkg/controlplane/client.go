@@ -114,6 +114,7 @@ type Client struct {
 	llmDeploymentService *utils.LLMDeploymentService
 	apiKeyXDSManager     utils.XDSManager
 	routerConfig         *config.RouterConfig
+	eventHub             eventhub.EventHub
 	policyManager        *policyxds.PolicyManager
 	systemConfig         *config.Config
 	policyDefinitions    map[string]api.PolicyDefinition
@@ -151,6 +152,7 @@ func NewClient(
 		apiKeyService:     utils.NewAPIKeyService(store, db, apiKeyXDSManager, apiKeyConfig, eventHub),
 		apiKeyXDSManager:  apiKeyXDSManager,
 		routerConfig:      routerConfig,
+		eventHub:          eventHub,
 		policyManager:     policyManager,
 		systemConfig:      systemConfig,
 		policyDefinitions: policyDefinitions,
@@ -791,9 +793,23 @@ func (c *Client) handleAPIUndeployedEvent(event map[string]interface{}) {
 		slog.String("correlation_id", undeployedEvent.CorrelationID),
 	)
 
-	// Check if API exists on this gateway
-	apiConfig, err := c.findAPIConfig(apiID)
+	if c.deploymentService == nil {
+		c.deploymentService = utils.NewAPIDeploymentService(c.store, c.db, c.validator, c.routerConfig, c.eventHub)
+	}
+
+	_, err = c.deploymentService.UndeployAPIConfiguration(utils.APIUndeploymentParams{
+		APIID:         apiID,
+		CorrelationID: undeployedEvent.CorrelationID,
+		Logger:        c.logger,
+	})
 	if err != nil {
+		if storage.IsDatabaseUnavailableError(err) {
+			c.logger.Warn("Database not available, cannot process API undeployment event in eventing mode",
+				slog.String("api_id", apiID),
+				slog.String("correlation_id", undeployedEvent.CorrelationID),
+			)
+			return
+		}
 		if storage.IsNotFoundError(err) {
 			c.logger.Warn("API configuration not found for undeployment",
 				slog.String("api_id", apiID),
@@ -801,45 +817,13 @@ func (c *Client) handleAPIUndeployedEvent(event map[string]interface{}) {
 			// Not an error - the API might already be undeployed or deleted
 			return
 		}
-		// Real storage error - log and abort
-		c.logger.Error("Failed to fetch API configuration for undeployment",
+		c.logger.Error("Failed to undeploy API configuration",
 			slog.String("api_id", apiID),
 			slog.String("correlation_id", undeployedEvent.CorrelationID),
 			slog.Any("error", err),
 		)
 		return
 	}
-
-	// Set status to undeployed (preserve config, keys, and policies)
-	apiConfig.Status = models.StatusUndeployed
-	apiConfig.UpdatedAt = time.Now()
-	// Keep DeployedVersion as-is - it tracks when it was last deployed
-
-	// Update database (only if persistent mode)
-	if c.db != nil {
-		if err := c.db.UpdateConfig(apiConfig); err != nil {
-			c.logger.Error("Failed to update config status in database",
-				slog.String("api_id", apiID),
-				slog.Any("error", err),
-			)
-			return
-		}
-	}
-
-	// Update in-memory store
-	if err := c.store.Update(apiConfig); err != nil {
-		c.logger.Error("Failed to update config status in memory store",
-			slog.String("api_id", apiID),
-			slog.Any("error", err),
-		)
-		return
-	}
-
-	// Note: We keep API keys and policies for potential redeploy
-	// They will be reused if the API is redeployed
-
-	// Update xDS snapshot asynchronously (undeployed APIs will be filtered out)
-	c.updateXDSSnapshotAsync(apiID, undeployedEvent.CorrelationID, false, true)
 
 	c.logger.Info("Successfully processed API undeployment event",
 		slog.String("api_id", apiID),
@@ -857,24 +841,14 @@ func (c *Client) findAPIConfig(apiID string) (*models.StoredConfig, error) {
 		if err == nil {
 			return config, nil
 		}
-		// If it's a real error (not just "not found"), surface it
-		if !storage.IsNotFoundError(err) {
-			return nil, fmt.Errorf("database error while fetching config: %w", err)
-		}
-		// Config not found in DB, fall through to check memory store
-	}
 
-	// Fall back to in-memory store
-	config, err := c.store.Get(apiID)
-	if err == nil {
-		return config, nil
+		if storage.IsNotFoundError(err) {
+			return nil, storage.ErrNotFound
+		}
+		return nil, fmt.Errorf("database error while fetching config: %w", err)
 	}
-	// If memory store also doesn't have it, return not found
-	if storage.IsNotFoundError(err) {
-		return nil, storage.ErrNotFound
-	}
-	// Other memory store errors
-	return nil, fmt.Errorf("memory store error while fetching config: %w", err)
+	// If it's a real error (not just "not found"), surface it
+	return nil, fmt.Errorf("database not available to fetch config")
 }
 
 // removePolicyConfiguration removes policy configuration with proper error handling

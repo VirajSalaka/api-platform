@@ -633,6 +633,109 @@ func TestDeleteAPIConfiguration_PublishesEventWithoutMutatingMemoryStore(t *test
 	assert.Equal(t, "corr-delete", hub.events[0].CorrelationID)
 }
 
+func TestUndeployAPIConfiguration_NoDatabase(t *testing.T) {
+	store := storage.NewConfigStore()
+	service := NewAPIDeploymentService(store, nil, nil, nil, nil)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	result, err := service.UndeployAPIConfiguration(APIUndeploymentParams{
+		APIID:         "test-id",
+		CorrelationID: "corr-undeploy",
+		Logger:        logger,
+	})
+
+	assert.Nil(t, result)
+	require.Error(t, err)
+	assert.True(t, storage.IsDatabaseUnavailableError(err))
+}
+
+func TestUndeployAPIConfiguration_NotFound(t *testing.T) {
+	store := storage.NewConfigStore()
+	db := setupSQLiteDBForAPIDeploymentTests(t)
+	hub := &mockEventHub{}
+	service := NewAPIDeploymentService(store, db, nil, nil, hub)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	result, err := service.UndeployAPIConfiguration(APIUndeploymentParams{
+		APIID:         "missing-id",
+		CorrelationID: "corr-undeploy-missing",
+		Logger:        logger,
+	})
+
+	assert.Nil(t, result)
+	require.Error(t, err)
+	assert.True(t, storage.IsNotFoundError(err))
+	assert.Empty(t, hub.events)
+}
+
+func TestUndeployAPIConfiguration_PublishesEventWithoutMutatingMemoryStore(t *testing.T) {
+	store := storage.NewConfigStore()
+	db := setupSQLiteDBForAPIDeploymentTests(t)
+	hub := &mockEventHub{}
+	service := NewAPIDeploymentService(store, db, nil, nil, hub)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var spec api.APIConfiguration_Spec
+	spec.FromAPIConfigData(api.APIConfigData{
+		DisplayName: "Undeploy Test API",
+		Version:     "v1",
+		Context:     "/undeploy-test",
+	})
+
+	cfg := &models.StoredConfig{
+		ID: "undeploy-test-id",
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Metadata: api.Metadata{
+				Name: "undeploy-test-handle",
+			},
+			Spec: spec,
+		},
+		SourceConfiguration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Metadata: api.Metadata{
+				Name: "undeploy-test-handle",
+			},
+			Spec: spec,
+		},
+		Status:          models.StatusDeployed,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+		DeployedAt:      nil,
+		DeployedVersion: 7,
+	}
+
+	require.NoError(t, db.SaveConfig(cfg))
+	require.NoError(t, store.Add(cfg))
+
+	result, err := service.UndeployAPIConfiguration(APIUndeploymentParams{
+		APIID:         cfg.ID,
+		CorrelationID: "corr-undeploy",
+		Logger:        logger,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, cfg.ID, result.StoredConfig.ID)
+	assert.Equal(t, models.StatusUndeployed, result.StoredConfig.Status)
+	assert.EqualValues(t, 7, result.StoredConfig.DeployedVersion)
+
+	dbConfig, err := db.GetConfig(cfg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusUndeployed, dbConfig.Status)
+	assert.EqualValues(t, 7, dbConfig.DeployedVersion)
+
+	// In-memory ConfigStore must remain unchanged until event listener sync.
+	inMemoryConfig, err := store.Get(cfg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusDeployed, inMemoryConfig.Status)
+
+	require.Len(t, hub.events, 1)
+	assert.Equal(t, eventhub.EventTypeAPI, hub.events[0].EventType)
+	assert.Equal(t, "UPDATE", hub.events[0].Action)
+	assert.Equal(t, cfg.ID, hub.events[0].EntityID)
+	assert.Equal(t, "corr-undeploy", hub.events[0].CorrelationID)
+}
+
 // Tests for lines 100-111: WebSub API parsing error path
 func TestDeployAPIConfiguration_WebSubParseError(t *testing.T) {
 	store := storage.NewConfigStore()

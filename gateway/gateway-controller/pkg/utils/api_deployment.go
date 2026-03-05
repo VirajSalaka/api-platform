@@ -64,6 +64,18 @@ type APIDeletionResult struct {
 	StoredConfig *models.StoredConfig
 }
 
+// APIUndeploymentParams contains parameters for API undeployment operations
+type APIUndeploymentParams struct {
+	APIID         string // API ID
+	CorrelationID string // Correlation ID for tracking
+	Logger        *slog.Logger
+}
+
+// APIUndeploymentResult contains the result of API undeployment
+type APIUndeploymentResult struct {
+	StoredConfig *models.StoredConfig
+}
+
 // ValidationErrorListError wraps validation errors for API configuration.
 // This allows callers to return structured validation errors in API responses.
 type ValidationErrorListError struct {
@@ -407,6 +419,44 @@ func (s *APIDeploymentService) DeleteAPIConfiguration(params APIDeletionParams) 
 	}
 
 	return &APIDeletionResult{StoredConfig: cfg}, nil
+}
+
+// UndeployAPIConfiguration handles API undeployment in the write path.
+// The in-memory config store is intentionally not updated here; replica sync is eventhub-driven.
+func (s *APIDeploymentService) UndeployAPIConfiguration(params APIUndeploymentParams) (*APIUndeploymentResult, error) {
+	logger := params.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	if s.db == nil {
+		return nil, fmt.Errorf("%w: cannot undeploy config without database", storage.ErrDatabaseUnavailable)
+	}
+
+	if params.APIID == "" {
+		return nil, fmt.Errorf("api id is required for undeployment")
+	}
+
+	cfg, err := s.db.GetConfig(params.APIID)
+	if err != nil {
+		if storage.IsNotFoundError(err) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return nil, fmt.Errorf("%w: api_id=%s", storage.ErrNotFound, params.APIID)
+		}
+		return nil, fmt.Errorf("failed to fetch config from database: %w", err)
+	}
+
+	// Preserve config, keys, and policies while marking undeployed.
+	cfg.Status = models.StatusUndeployed
+	cfg.UpdatedAt = time.Now()
+
+	if err := s.db.UpdateConfig(cfg); err != nil {
+		return nil, fmt.Errorf("failed to update config status in database: %w", err)
+	}
+
+	// Publish update event so all replicas (including self) converge through event listener sync.
+	s.publishEvent(eventhub.EventTypeAPI, "UPDATE", cfg.ID, params.CorrelationID, logger)
+
+	return &APIUndeploymentResult{StoredConfig: cfg}, nil
 }
 
 func (s *APIDeploymentService) deregisterWebSubTopicsOnDelete(cfg *models.StoredConfig, logger *slog.Logger) error {

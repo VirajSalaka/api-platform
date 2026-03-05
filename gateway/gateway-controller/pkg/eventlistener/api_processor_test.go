@@ -32,6 +32,78 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 )
 
+func TestHandleEvent_APIUpdate_SyncsUndeployedStatusFromDB(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := storage.NewConfigStore()
+	db := setupSQLiteDBForEventListenerTests(t)
+
+	apiID := "undeploy-sync-api-id"
+	now := time.Now()
+
+	staleInMemory := &models.StoredConfig{
+		ID:   apiID,
+		Kind: string(api.RestApi),
+		Configuration: api.APIConfiguration{
+			ApiVersion: api.APIConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
+			Kind:       api.RestApi,
+			Metadata: api.Metadata{
+				Name: "undeploy-sync-handle",
+			},
+		},
+		SourceConfiguration: api.APIConfiguration{
+			ApiVersion: api.APIConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
+			Kind:       api.RestApi,
+			Metadata: api.Metadata{
+				Name: "undeploy-sync-handle",
+			},
+		},
+		Status:    models.StatusDeployed,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, store.Add(staleInMemory))
+
+	dbConfig := &models.StoredConfig{
+		ID:   apiID,
+		Kind: string(api.RestApi),
+		Configuration: api.APIConfiguration{
+			ApiVersion: api.APIConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
+			Kind:       api.RestApi,
+			Metadata: api.Metadata{
+				Name: "undeploy-sync-handle",
+			},
+		},
+		SourceConfiguration: api.APIConfiguration{
+			ApiVersion: api.APIConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
+			Kind:       api.RestApi,
+			Metadata: api.Metadata{
+				Name: "undeploy-sync-handle",
+			},
+		},
+		Status:    models.StatusUndeployed,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.SaveConfig(dbConfig))
+
+	listener := &EventListener{
+		store:  store,
+		db:     db,
+		logger: logger,
+	}
+
+	listener.handleEvent(eventhub.Event{
+		EventType:     eventhub.EventTypeAPI,
+		Action:        "UPDATE",
+		EntityID:      apiID,
+		CorrelationID: "corr-api-update-undeploy",
+	})
+
+	updated, err := store.Get(apiID)
+	require.NoError(t, err)
+	assert.Equal(t, models.StatusUndeployed, updated.Status)
+}
+
 func TestHandleEvent_APIDelete_RemovesAPIKeysFromMemoryAndXDS(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := storage.NewConfigStore()
