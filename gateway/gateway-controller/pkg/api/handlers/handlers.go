@@ -134,10 +134,40 @@ func (s *APIServer) handleStatusUpdate(configID string, success bool, version in
 		log = s.logger.With(slog.String("correlation_id", correlationID))
 	}
 
-	cfg, err := s.db.GetConfig(configID)
-	if err != nil {
-		log.Warn("Config not found for status update", slog.String("id", configID))
-		return
+	var (
+		cfg      *models.StoredConfig
+		err      error
+		updateDB bool
+	)
+
+	if s.db != nil {
+		cfg, err = s.db.GetConfig(configID)
+		if err == nil {
+			updateDB = true
+		} else {
+			notFound := storage.IsNotFoundError(err) || strings.Contains(strings.ToLower(err.Error()), "not found")
+			if notFound {
+				log.Debug("Config not found in database for status update, falling back to memory store",
+					slog.String("id", configID))
+			} else {
+				log.Warn("Failed to load config from database for status update, falling back to memory store",
+					slog.String("id", configID),
+					slog.Any("error", err))
+			}
+		}
+	}
+
+	if cfg == nil {
+		if s.store == nil {
+			log.Warn("Config not found for status update", slog.String("id", configID))
+			return
+		}
+
+		cfg, err = s.store.Get(configID)
+		if err != nil {
+			log.Warn("Config not found for status update", slog.String("id", configID))
+			return
+		}
 	}
 
 	now := time.Now()
@@ -167,15 +197,17 @@ func (s *APIServer) handleStatusUpdate(configID string, success bool, version in
 	cfg.UpdatedAt = now
 
 	// Update database (only if persistent mode)
-	if s.db != nil {
+	if updateDB {
 		if err := s.db.UpdateConfig(cfg); err != nil {
 			log.Error("Failed to update config status in database", slog.Any("error", err), slog.String("id", configID))
 		}
 	}
 
 	// Update in-memory store
-	if err := s.store.Update(cfg); err != nil {
-		log.Error("Failed to update config status in memory", slog.Any("error", err), slog.String("id", configID))
+	if s.store != nil {
+		if err := s.store.Update(cfg); err != nil {
+			log.Error("Failed to update config status in memory", slog.Any("error", err), slog.String("id", configID))
+		}
 	}
 }
 
