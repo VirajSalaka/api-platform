@@ -634,6 +634,70 @@ func TestDeleteAPIConfiguration_PublishesEventWithoutMutatingMemoryStore(t *test
 	assert.Equal(t, eventhub.EmptyEventData, hub.events[0].EventData)
 }
 
+func TestDeleteAPIConfiguration_ByAPIIDPublishesEventWithoutMutatingMemoryStore(t *testing.T) {
+	store := storage.NewConfigStore()
+	db := setupSQLiteDBForAPIDeploymentTests(t)
+	hub := &mockEventHub{}
+	service := NewAPIDeploymentService(store, db, nil, nil, hub)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var spec api.APIConfiguration_Spec
+	spec.FromAPIConfigData(api.APIConfigData{
+		DisplayName: "Delete By ID Test API",
+		Version:     "v1",
+		Context:     "/delete-by-id-test",
+	})
+
+	cfg := &models.StoredConfig{
+		ID: "delete-by-id-test-id",
+		Configuration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Metadata: api.Metadata{
+				Name: "delete-by-id-test-handle",
+			},
+			Spec: spec,
+		},
+		SourceConfiguration: api.APIConfiguration{
+			Kind: api.RestApi,
+			Metadata: api.Metadata{
+				Name: "delete-by-id-test-handle",
+			},
+			Spec: spec,
+		},
+		Status:          models.StatusPending,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+		DeployedAt:      nil,
+		DeployedVersion: 0,
+	}
+
+	require.NoError(t, db.SaveConfig(cfg))
+	require.NoError(t, store.Add(cfg))
+
+	result, err := service.DeleteAPIConfiguration(APIDeletionParams{
+		APIID:         cfg.ID,
+		CorrelationID: "corr-delete-by-id",
+		Logger:        logger,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, cfg.ID, result.StoredConfig.ID)
+
+	_, err = db.GetConfig(cfg.ID)
+	require.Error(t, err)
+	assert.True(t, storage.IsNotFoundError(err))
+
+	_, err = store.Get(cfg.ID)
+	require.NoError(t, err)
+
+	require.Len(t, hub.events, 1)
+	assert.Equal(t, eventhub.EventTypeAPI, hub.events[0].EventType)
+	assert.Equal(t, "DELETE", hub.events[0].Action)
+	assert.Equal(t, cfg.ID, hub.events[0].EntityID)
+	assert.Equal(t, "corr-delete-by-id", hub.events[0].CorrelationID)
+	assert.Equal(t, eventhub.EmptyEventData, hub.events[0].EventData)
+}
+
 func TestUndeployAPIConfiguration_NoDatabase(t *testing.T) {
 	store := storage.NewConfigStore()
 	service := NewAPIDeploymentService(store, nil, nil, nil, nil)

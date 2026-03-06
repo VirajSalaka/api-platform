@@ -54,6 +54,7 @@ type APIDeploymentResult struct {
 
 // APIDeletionParams contains parameters for API deletion operations
 type APIDeletionParams struct {
+	APIID         string // API ID
 	Handle        string // API handle (metadata.name)
 	CorrelationID string // Correlation ID for tracking
 	Logger        *slog.Logger
@@ -387,12 +388,30 @@ func (s *APIDeploymentService) DeleteAPIConfiguration(params APIDeletionParams) 
 		return nil, fmt.Errorf("%w: cannot delete config without database", storage.ErrDatabaseUnavailable)
 	}
 
-	cfg, err := s.db.GetConfigByHandle(params.Handle)
-	if err != nil {
-		if storage.IsNotFoundError(err) || strings.Contains(strings.ToLower(err.Error()), "not found") {
-			return nil, fmt.Errorf("%w: handle=%s", storage.ErrNotFound, params.Handle)
+	var (
+		cfg *models.StoredConfig
+		err error
+	)
+
+	switch {
+	case params.APIID != "":
+		cfg, err = s.db.GetConfig(params.APIID)
+		if err != nil {
+			if storage.IsNotFoundError(err) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return nil, fmt.Errorf("%w: api_id=%s", storage.ErrNotFound, params.APIID)
+			}
+			return nil, fmt.Errorf("failed to fetch config from database: %w", err)
 		}
-		return nil, err
+	case params.Handle != "":
+		cfg, err = s.db.GetConfigByHandle(params.Handle)
+		if err != nil {
+			if storage.IsNotFoundError(err) || strings.Contains(strings.ToLower(err.Error()), "not found") {
+				return nil, fmt.Errorf("%w: handle=%s", storage.ErrNotFound, params.Handle)
+			}
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("api id or handle is required for deletion")
 	}
 
 	if err := s.db.DeleteConfig(cfg.ID); err != nil {
@@ -402,7 +421,8 @@ func (s *APIDeploymentService) DeleteAPIConfiguration(params APIDeletionParams) 
 	// Remove associated API keys from database (best effort)
 	if err := s.db.RemoveAPIKeysAPI(cfg.ID); err != nil {
 		logger.Warn("Failed to remove API keys from database",
-			slog.String("handle", params.Handle),
+			slog.String("api_id", cfg.ID),
+			slog.String("handle", cfg.GetHandle()),
 			slog.Any("error", err))
 	}
 

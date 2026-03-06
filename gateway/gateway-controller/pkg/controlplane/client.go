@@ -1132,17 +1132,30 @@ func (c *Client) handleAPIDeletedEvent(event map[string]interface{}) {
 		slog.String("correlation_id", deletedEvent.CorrelationID),
 	)
 
-	// Check if API exists on this gateway
-	apiConfig, err := c.findAPIConfig(apiID)
+	if c.deploymentService == nil {
+		c.deploymentService = utils.NewAPIDeploymentService(c.store, c.db, c.validator, c.routerConfig, c.eventHub)
+	}
+
+	_, err = c.deploymentService.DeleteAPIConfiguration(utils.APIDeletionParams{
+		APIID:         apiID,
+		CorrelationID: deletedEvent.CorrelationID,
+		Logger:        c.logger,
+	})
 	if err != nil {
-		if storage.IsNotFoundError(err) {
-			// Config not found - proceed with orphan cleanup
-			c.cleanupOrphanedResources(apiID, deletedEvent.CorrelationID)
+		if storage.IsDatabaseUnavailableError(err) {
+			c.logger.Warn("Database not available, cannot process API deletion event in eventing mode",
+				slog.String("api_id", apiID),
+				slog.String("correlation_id", deletedEvent.CorrelationID),
+			)
 			return
 		}
-		// Real storage error (DB failure, etc.) - log and abort
-		// Do NOT proceed with orphan cleanup as the config might actually exist
-		c.logger.Error("Failed to fetch API configuration for deletion, aborting",
+		if storage.IsNotFoundError(err) {
+			c.logger.Warn("API configuration not found for deletion",
+				slog.String("api_id", apiID),
+			)
+			return
+		}
+		c.logger.Error("Failed to delete API configuration",
 			slog.String("api_id", apiID),
 			slog.String("correlation_id", deletedEvent.CorrelationID),
 			slog.Any("error", err),
@@ -1150,8 +1163,10 @@ func (c *Client) handleAPIDeletedEvent(event map[string]interface{}) {
 		return
 	}
 
-	// Config found - perform full deletion
-	c.performFullAPIDeletion(apiID, apiConfig, deletedEvent.CorrelationID)
+	c.logger.Info("Successfully processed API deletion event",
+		slog.String("api_id", apiID),
+		slog.String("correlation_id", deletedEvent.CorrelationID),
+	)
 }
 
 // handleLLMProxyDeployedEvent handles LLM proxy deployment events
