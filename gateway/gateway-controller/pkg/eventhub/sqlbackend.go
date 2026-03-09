@@ -161,7 +161,7 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	}()
 
 	b.insertEventStmt, err = b.db.Prepare(b.rebind(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, event_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`))
 	if err != nil {
@@ -194,7 +194,7 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	}
 
 	b.getEventsStmt, err = b.db.Prepare(b.rebind(`
-		SELECT organization_id, processed_timestamp, originated_timestamp, event_type, action, entity_id, correlation_id, event_data
+		SELECT organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data
 		FROM events
 		WHERE organization_id = ? AND processed_timestamp > ?
 		ORDER BY processed_timestamp ASC

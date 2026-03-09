@@ -97,7 +97,25 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 	var version int
 	err = storage.db.QueryRow("PRAGMA user_version").Scan(&version)
 	assert.NilError(t, err)
-	assert.Equal(t, version, 10) // Current schema version
+	assert.Equal(t, version, 11) // Current schema version
+
+	var hasEntityType bool
+	err = storage.db.QueryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('events')
+		WHERE name = 'entity_type'
+	`).Scan(&hasEntityType)
+	assert.NilError(t, err)
+	assert.Assert(t, hasEntityType, "events table should include entity_type column")
+
+	var hasEventType bool
+	err = storage.db.QueryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('events')
+		WHERE name = 'event_type'
+	`).Scan(&hasEventType)
+	assert.NilError(t, err)
+	assert.Assert(t, !hasEventType, "events table should not include event_type column")
 
 	// Verify tables exist
 	tables := []string{
@@ -146,7 +164,7 @@ func TestSQLiteStorage_SchemaVersionUpgrade(t *testing.T) {
 	var version int
 	err = storage.db.QueryRow("PRAGMA user_version").Scan(&version)
 	assert.NilError(t, err)
-	assert.Equal(t, version, 10)
+	assert.Equal(t, version, 11)
 }
 
 func TestSQLiteStorage_DeleteConfig_NotFound(t *testing.T) {
