@@ -208,5 +208,6 @@ CREATE TABLE IF NOT EXISTS events (
     PRIMARY KEY (organization_id, processed_timestamp)
 );
 
--- Set schema version to 11 (renamed events.event_type to entity_type)
-PRAGMA user_version = 11;
+-- Set schema version to 10 (added organization_states and events tables for multi-replica sync)
+PRAGMA user_version = 10;
+

@@ -111,7 +111,7 @@ func (s *SQLiteStorage) initSchema() error {
 	}
 
 	if version == 0 {
-		s.logger.Info("Initializing database schema (version 11)")
+		s.logger.Info("Initializing database schema (version 10)")
 		s.logger.Debug("Creating schema with SQL", slog.String("schema_sql", schemaSQL))
 
 		// Execute schema creation SQL
@@ -767,30 +767,6 @@ func (s *SQLiteStorage) initSchema() error {
 			version = 10
 		}
 
-		if version == 10 {
-			s.logger.Info("Migrating schema to version 11 (renaming events.event_type to entity_type)")
-
-			hasEventType, err := s.columnExists("events", "event_type")
-			if err != nil {
-				return fmt.Errorf("failed to inspect events.event_type column: %w", err)
-			}
-			hasEntityType, err := s.columnExists("events", "entity_type")
-			if err != nil {
-				return fmt.Errorf("failed to inspect events.entity_type column: %w", err)
-			}
-
-			if hasEventType && !hasEntityType {
-				if _, err := s.db.Exec(`ALTER TABLE events RENAME COLUMN event_type TO entity_type;`); err != nil {
-					return fmt.Errorf("failed to rename events.event_type to entity_type: %w", err)
-				}
-			}
-
-			if _, err := s.db.Exec("PRAGMA user_version = 11"); err != nil {
-				return fmt.Errorf("failed to set schema version to 11: %w", err)
-			}
-			s.logger.Info("Schema migrated to version 11 (renamed events.event_type to entity_type)")
-			version = 11
-		}
 	}
 
 	s.logger.Info("Database schema up to date", slog.Int("version", version))
@@ -802,18 +778,6 @@ func (s *SQLiteStorage) initSchema() error {
 // This is used by the eventhub package for event synchronization.
 func (s *SQLiteStorage) GetDB() *sql.DB {
 	return s.db
-}
-
-func (s *SQLiteStorage) columnExists(tableName, columnName string) (bool, error) {
-	var count int
-	err := s.db.QueryRow(
-		fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?", tableName),
-		columnName,
-	).Scan(&count)
-	if err != nil {
-		return false, err
-	}
-	return count > 0, nil
 }
 
 func isUniqueConstraintError(err error) bool {

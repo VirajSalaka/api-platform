@@ -1,5 +1,5 @@
 -- PostgreSQL Schema for Gateway-Controller API Configurations
--- Version: 11
+-- Version: 10
 
 -- Main table for deployments
 CREATE TABLE IF NOT EXISTS deployments (
@@ -123,25 +123,6 @@ ALTER TABLE deployments ADD COLUMN IF NOT EXISTS gateway_id TEXT NOT NULL DEFAUL
 ALTER TABLE certificates ADD COLUMN IF NOT EXISTS gateway_id TEXT NOT NULL DEFAULT 'platform-gateway-id';
 ALTER TABLE llm_provider_templates ADD COLUMN IF NOT EXISTS gateway_id TEXT NOT NULL DEFAULT 'platform-gateway-id';
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS gateway_id TEXT NOT NULL DEFAULT 'platform-gateway-id';
-
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = 'events'
-          AND column_name = 'event_type'
-    ) AND NOT EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = 'events'
-          AND column_name = 'entity_type'
-    ) THEN
-        ALTER TABLE events RENAME COLUMN event_type TO entity_type;
-    END IF;
-END $$;
 
 ALTER TABLE deployments DROP CONSTRAINT IF EXISTS deployments_display_name_version_key;
 ALTER TABLE deployments DROP CONSTRAINT IF EXISTS deployments_handle_key;
