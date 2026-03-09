@@ -203,11 +203,10 @@ CREATE TABLE IF NOT EXISTS events (
     entity_type TEXT NOT NULL,
     action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
     entity_id TEXT NOT NULL,
-    correlation_id TEXT NOT NULL DEFAULT '',
+    correlation_id TEXT NOT NULL,
     event_data TEXT NOT NULL,
-    PRIMARY KEY (organization_id, processed_timestamp)
+    PRIMARY KEY (correlation_id)
 );
 
 -- Set schema version to 10 (added organization_states and events tables for multi-replica sync)
 PRAGMA user_version = 10;
-

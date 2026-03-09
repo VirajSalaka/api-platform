@@ -252,6 +252,9 @@ func (b *SQLBackend) Publish(orgID string, event Event) error {
 	if eventData == "" {
 		eventData = EmptyEventData
 	}
+	if strings.TrimSpace(event.CorrelationID) == "" {
+		event.CorrelationID = uuid.New().String()
+	}
 
 	tx, err := b.db.BeginTx(b.ctx, nil)
 	if err != nil {

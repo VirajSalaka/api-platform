@@ -50,9 +50,9 @@ func setupTestDB(t *testing.T) *sql.DB {
 			entity_type TEXT NOT NULL,
 			action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
 			entity_id TEXT NOT NULL,
-			correlation_id TEXT NOT NULL DEFAULT '',
+			correlation_id TEXT NOT NULL,
 			event_data TEXT NOT NULL,
-			PRIMARY KEY (organization_id, processed_timestamp)
+			PRIMARY KEY (correlation_id)
 		);
 	`)
 	require.NoError(t, err)
@@ -140,9 +140,9 @@ func TestCleanUpEvents(t *testing.T) {
 	// Insert old event directly
 	oldTime := time.Now().Add(-2 * time.Hour)
 	_, err := db.Exec(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_data)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, "test-org", oldTime, oldTime, "API", "CREATE", "old-api", "{}")
+		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, "test-org", oldTime, oldTime, "API", "CREATE", "old-api", "cleanup-old-api", "{}")
 	require.NoError(t, err)
 
 	// Cleanup
@@ -379,11 +379,11 @@ func TestPollOrganizationWithStateFirstPollUsesSkewWindow(t *testing.T) {
 	oldTs := now.Add(-2 * time.Minute)
 	recentTs := now.Add(-15 * time.Second)
 	_, err = db.Exec(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_data)
-		VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "{}",
-		"test-org", recentTs, recentTs, "API", "CREATE", "recent-entity", "{}",
+		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "state-skew-old", "{}",
+		"test-org", recentTs, recentTs, "API", "CREATE", "recent-entity", "state-skew-recent", "{}",
 	)
 	require.NoError(t, err)
 
@@ -428,11 +428,11 @@ func TestPollOrganizationWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	oldTs := now.Add(-2 * time.Minute)
 	recentTs := now.Add(-10 * time.Second)
 	_, err = db.Exec(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_data)
-		VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "{}",
-		"test-org", recentTs, recentTs, "API", "CREATE", "recent-entity", "{}",
+		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "unix-seconds-old", "{}",
+		"test-org", recentTs, recentTs, "API", "CREATE", "recent-entity", "unix-seconds-recent", "{}",
 	)
 	require.NoError(t, err)
 
@@ -478,11 +478,11 @@ func TestPollOrganizationWithStateRetriesDeferredEventsFromLastDeliveredTimestam
 	firstTs := time.Now().Add(-2 * time.Second)
 	secondTs := firstTs.Add(10 * time.Millisecond)
 	_, err := db.Exec(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_data)
-		VALUES (?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
-		"test-org", firstTs, firstTs, "API", "CREATE", "first-entity", "{}",
-		"test-org", secondTs, secondTs, "API", "CREATE", "second-entity", "{}",
+		"test-org", firstTs, firstTs, "API", "CREATE", "first-entity", "deferred-first", "{}",
+		"test-org", secondTs, secondTs, "API", "CREATE", "second-entity", "deferred-second", "{}",
 	)
 	require.NoError(t, err)
 

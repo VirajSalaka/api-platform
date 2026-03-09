@@ -113,9 +113,9 @@ CREATE TABLE IF NOT EXISTS events (
     entity_type TEXT NOT NULL,
     action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
     entity_id TEXT NOT NULL,
-    correlation_id TEXT NOT NULL DEFAULT '',
+    correlation_id TEXT NOT NULL,
     event_data TEXT NOT NULL,
-    PRIMARY KEY (organization_id, processed_timestamp)
+    PRIMARY KEY (correlation_id)
 );
 
 -- Migration-safe column additions for existing deployments

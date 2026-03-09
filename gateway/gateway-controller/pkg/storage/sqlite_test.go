@@ -117,6 +117,15 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Assert(t, !hasEventType, "events table should not include event_type column")
 
+	var correlationIDIsPrimaryKey bool
+	err = storage.db.QueryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('events')
+		WHERE name = 'correlation_id' AND pk = 1
+	`).Scan(&correlationIDIsPrimaryKey)
+	assert.NilError(t, err)
+	assert.Assert(t, correlationIDIsPrimaryKey, "events.correlation_id should be the primary key")
+
 	// Verify tables exist
 	tables := []string{
 		"deployments",
