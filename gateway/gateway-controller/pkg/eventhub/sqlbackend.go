@@ -161,7 +161,7 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	}()
 
 	b.insertEventStmt, err = b.db.Prepare(b.rebind(`
-		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`))
 	if err != nil {
@@ -194,7 +194,7 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	}
 
 	b.getEventsStmt, err = b.db.Prepare(b.rebind(`
-		SELECT gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data
+		SELECT gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data
 		FROM events
 		WHERE gateway_id = ? AND processed_timestamp > ?
 		ORDER BY processed_timestamp ASC
@@ -247,13 +247,17 @@ func (b *SQLBackend) RegisterGateway(gatewayID string) error {
 
 // Publish publishes an event atomically (insert event + update gateway version).
 func (b *SQLBackend) Publish(gatewayID string, event Event) error {
+	// TODO: (VirajSalaka) Make this UUID v7
 	newVersion := uuid.New().String()
 	eventData := strings.TrimSpace(event.EventData)
 	if eventData == "" {
 		eventData = EmptyEventData
 	}
-	if strings.TrimSpace(event.CorrelationID) == "" {
-		event.CorrelationID = uuid.New().String()
+	eventID := strings.TrimSpace(event.EventID)
+	if eventID == "" {
+		// TODO: (VirajSalaka) Make this UUID v7
+		event.EventID = uuid.New().String()
+		eventID = event.EventID
 	}
 
 	tx, err := b.db.BeginTx(b.ctx, nil)
@@ -274,7 +278,7 @@ func (b *SQLBackend) Publish(gatewayID string, event Event) error {
 		string(event.EventType),
 		event.Action,
 		event.EntityID,
-		event.CorrelationID,
+		eventID,
 		eventData,
 	)
 	if err != nil {
@@ -470,6 +474,7 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 	for rows.Next() {
 		var evt Event
 		var eventType string
+		var eventID string
 		if err := rows.Scan(
 			&evt.GatewayID,
 			&evt.ProcessedTimestamp,
@@ -477,12 +482,13 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 			&eventType,
 			&evt.Action,
 			&evt.EntityID,
-			&evt.CorrelationID,
+			&eventID,
 			&evt.EventData,
 		); err != nil {
 			return fmt.Errorf("failed to scan event row: %w", err)
 		}
 		evt.EventType = EventType(eventType)
+		evt.EventID = eventID
 		events = append(events, evt)
 	}
 	if err := rows.Err(); err != nil {

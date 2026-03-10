@@ -135,14 +135,14 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Assert(t, hasGatewayStateID, "gateway_states table should include gateway_id column")
 
-	var correlationIDIsPrimaryKey bool
+	var eventIDIsPrimaryKey bool
 	err = storage.db.QueryRow(`
 		SELECT COUNT(*) > 0
 		FROM pragma_table_info('events')
-		WHERE name = 'correlation_id' AND pk = 1
-	`).Scan(&correlationIDIsPrimaryKey)
+		WHERE name = 'event_id' AND pk = 1
+	`).Scan(&eventIDIsPrimaryKey)
 	assert.NilError(t, err)
-	assert.Assert(t, correlationIDIsPrimaryKey, "events.correlation_id should be the primary key")
+	assert.Assert(t, eventIDIsPrimaryKey, "events.event_id should be the primary key")
 
 	// Verify tables exist
 	tables := []string{

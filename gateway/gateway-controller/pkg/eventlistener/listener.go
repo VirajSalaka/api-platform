@@ -145,7 +145,7 @@ func (l *EventListener) processEventSafely(event eventhub.Event) {
 				slog.String("event_type", string(event.EventType)),
 				slog.String("action", event.Action),
 				slog.String("entity_id", event.EntityID),
-				slog.String("correlation_id", event.CorrelationID),
+				slog.String("event_id", event.EventID),
 				slog.Any("panic", p),
 				slog.String("stack_trace", string(debug.Stack())))
 		}
@@ -160,7 +160,7 @@ func (l *EventListener) handleEvent(event eventhub.Event) {
 		slog.String("event_type", string(event.EventType)),
 		slog.String("action", event.Action),
 		slog.String("entity_id", event.EntityID),
-		slog.String("correlation_id", event.CorrelationID))
+		slog.String("event_id", event.EventID))
 
 	switch event.EventType {
 	case eventhub.EventTypeAPI:

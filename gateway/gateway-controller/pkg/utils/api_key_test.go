@@ -62,7 +62,7 @@ func TestPublishAPIKeyEvent_UsesEmptyEventData(t *testing.T) {
 	assert.Equal(t, eventhub.EventTypeAPIKey, hub.events[0].EventType)
 	assert.Equal(t, "CREATE", hub.events[0].Action)
 	assert.Equal(t, "api-1_key-1", hub.events[0].EntityID)
-	assert.Equal(t, "corr-apikey", hub.events[0].CorrelationID)
+	assert.Equal(t, "corr-apikey", hub.events[0].EventID)
 	assert.Equal(t, eventhub.EmptyEventData, hub.events[0].EventData)
 }
 

@@ -199,10 +199,10 @@ func TestHandleEvent_APIKeyCreate_SyncsMemoryAndXDS(t *testing.T) {
 	}
 
 	listener.handleEvent(eventhub.Event{
-		EventType:     eventhub.EventTypeAPIKey,
-		Action:        "CREATE",
-		EntityID:      eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
-		CorrelationID: "corr-apikey-create",
+		EventType: eventhub.EventTypeAPIKey,
+		Action:    "CREATE",
+		EntityID:  eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
+		EventID:   "corr-apikey-create",
 	})
 
 	storedKey, err := store.GetAPIKeyByName(apiID, "test-key")
@@ -303,10 +303,10 @@ func TestHandleEvent_APIKeyUpdateActions_SyncsMemoryAndXDS(t *testing.T) {
 			}
 
 			listener.handleEvent(eventhub.Event{
-				EventType:     eventhub.EventTypeAPIKey,
-				Action:        action,
-				EntityID:      eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
-				CorrelationID: "corr-apikey-upsert",
+				EventType: eventhub.EventTypeAPIKey,
+				Action:    action,
+				EntityID:  eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
+				EventID:   "corr-apikey-upsert",
 			})
 
 			storedKey, err := store.GetAPIKeyByName(apiID, "test-key")
@@ -408,10 +408,10 @@ func TestHandleEvent_APIKeyRevoke_RemovesMemoryAndXDS(t *testing.T) {
 	}
 
 	listener.handleEvent(eventhub.Event{
-		EventType:     eventhub.EventTypeAPIKey,
-		Action:        "REVOKE",
-		EntityID:      eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
-		CorrelationID: "corr-apikey-revoke",
+		EventType: eventhub.EventTypeAPIKey,
+		Action:    "REVOKE",
+		EntityID:  eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
+		EventID:   "corr-apikey-revoke",
 	})
 
 	_, err = store.GetAPIKeyByName(apiID, "test-key")

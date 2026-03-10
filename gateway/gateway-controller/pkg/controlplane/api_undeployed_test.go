@@ -81,10 +81,11 @@ func TestClient_handleAPIUndeployedEvent_UpdatesDBAndPublishesEvent(t *testing.T
 	}
 
 	client := &Client{
-		logger:   logger,
-		store:    store,
-		db:       db,
-		eventHub: hub,
+		logger:       logger,
+		store:        store,
+		db:           db,
+		eventHub:     hub,
+		systemConfig: testControlplaneSystemConfig(),
 	}
 
 	event := map[string]interface{}{
@@ -130,8 +131,8 @@ func TestClient_handleAPIUndeployedEvent_UpdatesDBAndPublishesEvent(t *testing.T
 	if published.EntityID != apiID {
 		t.Fatalf("published entity id = %s, want %s", published.EntityID, apiID)
 	}
-	if published.CorrelationID != "corr-undeploy-1" {
-		t.Fatalf("published correlation id = %s, want corr-undeploy-1", published.CorrelationID)
+	if published.EventID != "corr-undeploy-1" {
+		t.Fatalf("published event id = %s, want corr-undeploy-1", published.EventID)
 	}
 }
 
@@ -142,10 +143,11 @@ func TestClient_handleAPIUndeployedEvent_NotFoundDoesNotPublish(t *testing.T) {
 	hub := &mockEventHubForUndeploy{}
 
 	client := &Client{
-		logger:   logger,
-		store:    store,
-		db:       db,
-		eventHub: hub,
+		logger:       logger,
+		store:        store,
+		db:           db,
+		eventHub:     hub,
+		systemConfig: testControlplaneSystemConfig(),
 	}
 
 	event := map[string]interface{}{

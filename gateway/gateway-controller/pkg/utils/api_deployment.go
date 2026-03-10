@@ -145,7 +145,7 @@ func (s *APIDeploymentService) publishEvent(eventType eventhub.EventType, action
 		EventType:           eventType,
 		Action:              action,
 		EntityID:            entityID,
-		CorrelationID:       correlationID,
+		EventID:             correlationID,
 		EventData:           eventhub.EmptyEventData,
 	}
 

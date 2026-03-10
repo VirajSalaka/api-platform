@@ -46,7 +46,7 @@ type Event struct {
 	EventType           EventType `json:"event_type"`
 	Action              string    `json:"action"`
 	EntityID            string    `json:"entity_id"`
-	CorrelationID       string    `json:"correlation_id"`
+	EventID             string    `json:"event_id"`
 	// EventData carries optional event-specific details that are not already
 	// represented by top-level fields such as Action and EntityID.
 	EventData string `json:"event_data"`

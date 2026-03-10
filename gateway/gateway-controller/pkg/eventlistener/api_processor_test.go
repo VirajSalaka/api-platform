@@ -93,10 +93,10 @@ func TestHandleEvent_APIUpdate_SyncsUndeployedStatusFromDB(t *testing.T) {
 	}
 
 	listener.handleEvent(eventhub.Event{
-		EventType:     eventhub.EventTypeAPI,
-		Action:        "UPDATE",
-		EntityID:      apiID,
-		CorrelationID: "corr-api-update-undeploy",
+		EventType: eventhub.EventTypeAPI,
+		Action:    "UPDATE",
+		EntityID:  apiID,
+		EventID:   "corr-api-update-undeploy",
 	})
 
 	updated, err := store.Get(apiID)
@@ -179,10 +179,10 @@ func TestHandleEvent_APIDelete_RemovesAPIKeysFromMemoryAndXDS(t *testing.T) {
 	}
 
 	listener.handleEvent(eventhub.Event{
-		EventType:     eventhub.EventTypeAPI,
-		Action:        "DELETE",
-		EntityID:      apiID,
-		CorrelationID: "corr-api-delete",
+		EventType: eventhub.EventTypeAPI,
+		Action:    "DELETE",
+		EntityID:  apiID,
+		EventID:   "corr-api-delete",
 	})
 
 	_, err = store.Get(apiID)

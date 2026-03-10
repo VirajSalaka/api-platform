@@ -50,9 +50,9 @@ func setupTestDB(t *testing.T) *sql.DB {
 			entity_type TEXT NOT NULL,
 			action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
 			entity_id TEXT NOT NULL,
-			correlation_id TEXT NOT NULL,
+			event_id TEXT NOT NULL,
 			event_data TEXT NOT NULL,
-			PRIMARY KEY (correlation_id),
+			PRIMARY KEY (event_id),
 			UNIQUE (gateway_id, processed_timestamp)
 		);
 	`)
@@ -110,7 +110,7 @@ func TestPublishAndSubscribe(t *testing.T) {
 		EventType:           EventTypeAPI,
 		Action:              "CREATE",
 		EntityID:            "api-123",
-		CorrelationID:       "corr-456",
+		EventID:             "corr-456",
 		EventData:           `{"name":"test-api"}`,
 	}
 	require.NoError(t, hub.PublishEvent("test-org", event))
@@ -140,7 +140,7 @@ func TestCleanUpEvents(t *testing.T) {
 	// Insert old event directly
 	oldTime := time.Now().Add(-2 * time.Hour)
 	_, err := db.Exec(`
-		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, "test-org", oldTime, oldTime, "API", "CREATE", "old-api", "cleanup-old-api", "{}")
 	require.NoError(t, err)
@@ -379,7 +379,7 @@ func TestPollGatewayWithStateFirstPollUsesSkewWindow(t *testing.T) {
 	oldTs := now.Add(-2 * time.Minute)
 	recentTs := now.Add(-15 * time.Second)
 	_, err = db.Exec(`
-		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "state-skew-old", "{}",
@@ -428,7 +428,7 @@ func TestPollGatewayWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	oldTs := now.Add(-2 * time.Minute)
 	recentTs := now.Add(-10 * time.Second)
 	_, err = db.Exec(`
-		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "unix-seconds-old", "{}",
@@ -478,7 +478,7 @@ func TestPollGatewayWithStateRetriesDeferredEventsFromLastDeliveredTimestamp(t *
 	firstTs := time.Now().Add(-2 * time.Second)
 	secondTs := firstTs.Add(10 * time.Millisecond)
 	_, err := db.Exec(`
-		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		"test-org", firstTs, firstTs, "API", "CREATE", "first-entity", "deferred-first", "{}",

@@ -51,18 +51,18 @@ func TestProcessEvents_RecoversFromPanicAndContinues(t *testing.T) {
 
 	// This panics because listener.store is nil when handling DELETE.
 	eventCh <- eventhub.Event{
-		EventType:     eventhub.EventTypeAPI,
-		Action:        "DELETE",
-		EntityID:      "panic-api-id",
-		CorrelationID: "corr-panic",
+		EventType: eventhub.EventTypeAPI,
+		Action:    "DELETE",
+		EntityID:  "panic-api-id",
+		EventID:   "corr-panic",
 	}
 
 	// If recovery works, the loop should continue and process this event too.
 	eventCh <- eventhub.Event{
-		EventType:     eventhub.EventType("UNKNOWN"),
-		Action:        "UPDATE",
-		EntityID:      "safe-event-id",
-		CorrelationID: "corr-safe",
+		EventType: eventhub.EventType("UNKNOWN"),
+		Action:    "UPDATE",
+		EntityID:  "safe-event-id",
+		EventID:   "corr-safe",
 	}
 
 	close(eventCh)

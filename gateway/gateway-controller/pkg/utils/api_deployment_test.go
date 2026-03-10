@@ -634,7 +634,7 @@ func TestDeleteAPIConfiguration_PublishesEventWithoutMutatingMemoryStore(t *test
 	assert.Equal(t, eventhub.EventTypeAPI, hub.events[0].EventType)
 	assert.Equal(t, "DELETE", hub.events[0].Action)
 	assert.Equal(t, cfg.ID, hub.events[0].EntityID)
-	assert.Equal(t, "corr-delete", hub.events[0].CorrelationID)
+	assert.Equal(t, "corr-delete", hub.events[0].EventID)
 	assert.Equal(t, eventhub.EmptyEventData, hub.events[0].EventData)
 }
 
@@ -698,7 +698,7 @@ func TestDeleteAPIConfiguration_ByAPIIDPublishesEventWithoutMutatingMemoryStore(
 	assert.Equal(t, eventhub.EventTypeAPI, hub.events[0].EventType)
 	assert.Equal(t, "DELETE", hub.events[0].Action)
 	assert.Equal(t, cfg.ID, hub.events[0].EntityID)
-	assert.Equal(t, "corr-delete-by-id", hub.events[0].CorrelationID)
+	assert.Equal(t, "corr-delete-by-id", hub.events[0].EventID)
 	assert.Equal(t, eventhub.EmptyEventData, hub.events[0].EventData)
 }
 
@@ -802,7 +802,7 @@ func TestUndeployAPIConfiguration_PublishesEventWithoutMutatingMemoryStore(t *te
 	assert.Equal(t, eventhub.EventTypeAPI, hub.events[0].EventType)
 	assert.Equal(t, "UPDATE", hub.events[0].Action)
 	assert.Equal(t, cfg.ID, hub.events[0].EntityID)
-	assert.Equal(t, "corr-undeploy", hub.events[0].CorrelationID)
+	assert.Equal(t, "corr-undeploy", hub.events[0].EventID)
 	assert.Equal(t, eventhub.EmptyEventData, hub.events[0].EventData)
 }
 

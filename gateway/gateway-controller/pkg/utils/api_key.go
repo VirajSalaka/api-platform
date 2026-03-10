@@ -218,7 +218,7 @@ func (s *APIKeyService) publishAPIKeyEvent(action, entityID, correlationID strin
 		EventType:           eventhub.EventTypeAPIKey,
 		Action:              action,
 		EntityID:            entityID,
-		CorrelationID:       correlationID,
+		EventID:             correlationID,
 		EventData:           eventhub.EmptyEventData,
 	}
 
