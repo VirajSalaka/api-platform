@@ -23,7 +23,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
+	"github.com/wso2/api-platform/common/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
 )

@@ -35,8 +35,8 @@ import (
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 
 	"github.com/gorilla/websocket"
+	"github.com/wso2/api-platform/common/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/lazyresourcexds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policy"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"

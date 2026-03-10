@@ -23,8 +23,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/wso2/api-platform/common/eventhub"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	policybuilder "github.com/wso2/api-platform/gateway/gateway-controller/pkg/policy"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"

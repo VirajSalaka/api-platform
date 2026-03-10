@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wso2/api-platform/common/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/adminserver"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/apikeyxds"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventlistener"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/lazyresourcexds"
 

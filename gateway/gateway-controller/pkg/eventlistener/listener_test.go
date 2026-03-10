@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
+	"github.com/wso2/api-platform/common/eventhub"
 )
 
 func TestProcessEvents_RecoversFromPanicAndContinues(t *testing.T) {

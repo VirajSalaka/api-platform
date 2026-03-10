@@ -32,8 +32,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wso2/api-platform/common/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
-	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 
 	commonmodels "github.com/wso2/api-platform/common/models"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
