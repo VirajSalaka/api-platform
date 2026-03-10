@@ -81,3 +81,16 @@ func TestProcessEvents_RecoversFromPanicAndContinues(t *testing.T) {
 		t.Fatalf("expected processing to continue after panic, got: %s", logs)
 	}
 }
+
+func TestStart_RequiresSystemConfig(t *testing.T) {
+	listener := &EventListener{}
+
+	err := listener.Start()
+
+	if err == nil {
+		t.Fatal("expected start to fail without system config")
+	}
+	if !strings.Contains(err.Error(), "system configuration") {
+		t.Fatalf("expected system configuration error, got: %v", err)
+	}
+}

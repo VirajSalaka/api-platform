@@ -1460,11 +1460,6 @@ func (s *sqlStore) GetDB() *sql.DB {
 	return s.db
 }
 
-// GetGatewayID returns the configured gateway identifier for this storage instance.
-func (s *sqlStore) GetGatewayID() string {
-	return s.gatewayId
-}
-
 // Close closes the database connection
 func (s *sqlStore) Close() error {
 	backend := s.backendName

@@ -137,17 +137,24 @@ type APIKeyService struct {
 	xdsManager   XDSManager
 	apiKeyConfig *config.APIKeyConfig // Configuration for API keys
 	eventHub     eventhub.EventHub
+	gatewayID    string
 }
 
 // NewAPIKeyService creates a new API key generation service
 func NewAPIKeyService(store *storage.ConfigStore, db storage.Storage, xdsManager XDSManager,
-	apiKeyConfig *config.APIKeyConfig, hub eventhub.EventHub) *APIKeyService {
+	apiKeyConfig *config.APIKeyConfig, hub eventhub.EventHub, gatewayID ...string) *APIKeyService {
+	resolvedGatewayID := ""
+	if len(gatewayID) > 0 {
+		resolvedGatewayID = strings.TrimSpace(gatewayID[0])
+	}
+
 	return &APIKeyService{
 		store:        store,
 		db:           db,
 		xdsManager:   xdsManager,
 		apiKeyConfig: apiKeyConfig,
 		eventHub:     hub,
+		gatewayID:    resolvedGatewayID,
 	}
 }
 
@@ -196,9 +203,13 @@ func (s *APIKeyService) publishAPIKeyEvent(action, entityID, correlationID strin
 		logger = slog.Default()
 	}
 
-	gatewayID := eventhub.DefaultGatewayID
-	if s.db != nil {
-		gatewayID = eventhub.ResolveGatewayID(s.db.GetGatewayID())
+	gatewayID := strings.TrimSpace(s.gatewayID)
+	if gatewayID == "" {
+		logger.Warn("Skipping event hub publish because gateway ID is not configured",
+			slog.String("event_type", string(eventhub.EventTypeAPIKey)),
+			slog.String("action", action),
+			slog.String("entity_id", entityID))
+		return
 	}
 
 	event := eventhub.Event{

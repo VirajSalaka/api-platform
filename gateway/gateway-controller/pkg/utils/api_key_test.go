@@ -52,7 +52,8 @@ func TestNewAPIKeyService(t *testing.T) {
 func TestPublishAPIKeyEvent_UsesEmptyEventData(t *testing.T) {
 	hub := &mockEventHub{}
 	service := &APIKeyService{
-		eventHub: hub,
+		eventHub:  hub,
+		gatewayID: constants.PlatformGatewayId,
 	}
 
 	service.publishAPIKeyEvent("CREATE", "api-1_key-1", "corr-apikey", nil)

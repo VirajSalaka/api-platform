@@ -470,7 +470,11 @@ func createTestAPIServer() *APIServer {
 		},
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		systemConfig: &config.Config{
-			Controller: config.Controller{},
+			Controller: config.Controller{
+				Server: config.ServerConfig{
+					GatewayID: "platform-gateway-id",
+				},
+			},
 			Router: config.RouterConfig{
 				GatewayHost: "localhost",
 				VHosts:      *vhosts,
@@ -484,7 +488,7 @@ func createTestAPIServer() *APIServer {
 	}
 
 	// Initialize API key service (needed for API key operations)
-	apiKeyService := utils.NewAPIKeyService(store, mockDB, nil, &server.systemConfig.APIKey, nil)
+	apiKeyService := utils.NewAPIKeyService(store, mockDB, nil, &server.systemConfig.APIKey, nil, server.systemConfig.Controller.Server.GatewayID)
 	server.apiKeyService = apiKeyService
 
 	return server
@@ -1053,7 +1057,7 @@ func TestUpdateAPIPublishesEventWithoutMutatingMemoryStore(t *testing.T) {
 	server.db = setupSQLiteDBForHandlerTests(t)
 
 	hub := &mockEventHub{}
-	server.deploymentService = utils.NewAPIDeploymentService(server.store, server.db, server.validator, server.routerConfig, hub)
+	server.deploymentService = utils.NewAPIDeploymentService(server.store, server.db, server.validator, server.routerConfig, hub, server.systemConfig.Controller.Server.GatewayID)
 
 	storeCfg := createTestStoredConfig("test-id", "test-api", "v1.0.0", "/test")
 	dbCfg := createTestStoredConfig("test-id", "test-api", "v1.0.0", "/test")

@@ -95,7 +95,9 @@ func NewAPIServer(
 	systemConfig *config.Config,
 	eventHubInstance eventhub.EventHub,
 ) *APIServer {
-	deploymentService := utils.NewAPIDeploymentService(store, db, validator, &systemConfig.Router, eventHubInstance)
+	gatewayID := systemConfig.Controller.Server.GatewayID
+
+	deploymentService := utils.NewAPIDeploymentService(store, db, validator, &systemConfig.Router, eventHubInstance, gatewayID)
 	policyVersionResolver := utils.NewLoadedPolicyVersionResolver(policyDefinitions)
 	policyValidator := config.NewPolicyValidator(policyDefinitions)
 	server := &APIServer{
@@ -112,7 +114,7 @@ func NewAPIServer(
 		llmDeploymentService: utils.NewLLMDeploymentService(store, db, snapshotManager, lazyResourceManager, templateDefinitions,
 			deploymentService, &systemConfig.Router, policyVersionResolver, policyValidator),
 		apiKeyService: utils.NewAPIKeyService(store, db, apiKeyXDSManager,
-			&systemConfig.APIKey, eventHubInstance),
+			&systemConfig.APIKey, eventHubInstance, gatewayID),
 		apiKeyXDSManager:   apiKeyXDSManager,
 		controlPlaneClient: controlPlaneClient,
 		routerConfig:       &systemConfig.Router,

@@ -18,10 +18,7 @@
 
 package eventhub
 
-import (
-	"strings"
-	"time"
-)
+import "time"
 
 // EventType represents the type of event
 type EventType string
@@ -39,10 +36,6 @@ const (
 	// EmptyEventData is the canonical JSON payload for events that do not
 	// require additional data beyond the top-level event fields.
 	EmptyEventData = "{}"
-
-	// DefaultGatewayID is used when callers do not yet have a concrete
-	// configured gateway identifier available.
-	DefaultGatewayID = "default_gateway_id"
 )
 
 // Event represents a change event in the system
@@ -96,16 +89,4 @@ func DefaultConfig() Config {
 		CleanupInterval: 5 * time.Minute,
 		RetentionPeriod: 1 * time.Hour,
 	}
-}
-
-// TODO: (VirajSalaka) See if we need fallback here, 
-// since we can populate that in the Default Configuration
-
-// ResolveGatewayID normalizes a caller-provided gateway ID and falls back to
-// the default event hub gateway when none is available yet.
-func ResolveGatewayID(gatewayID string) string {
-	if resolved := strings.TrimSpace(gatewayID); resolved != "" {
-		return resolved
-	}
-	return DefaultGatewayID
 }

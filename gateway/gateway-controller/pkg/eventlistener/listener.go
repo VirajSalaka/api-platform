@@ -20,8 +20,10 @@ package eventlistener
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strings"
 
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
@@ -90,11 +92,13 @@ func NewEventListener(
 
 // Start begins listening for events
 func (l *EventListener) Start() error {
-	gatewayID := eventhub.DefaultGatewayID
-	if l.db != nil {
-		gatewayID = eventhub.ResolveGatewayID(l.db.GetGatewayID())
-	} else if l.systemConfig != nil {
-		gatewayID = eventhub.ResolveGatewayID(l.systemConfig.Controller.Server.GatewayID)
+	if l.systemConfig == nil {
+		return fmt.Errorf("event listener requires system configuration")
+	}
+
+	gatewayID := strings.TrimSpace(l.systemConfig.Controller.Server.GatewayID)
+	if gatewayID == "" {
+		return fmt.Errorf("event listener requires controller.server.gateway_id")
 	}
 
 	ch, err := l.eventHub.Subscribe(gatewayID)

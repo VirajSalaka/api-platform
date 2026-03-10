@@ -35,6 +35,7 @@ import (
 	"github.com/stretchr/testify/require"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/constants"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/eventhub"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/metrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
@@ -575,7 +576,7 @@ func TestDeleteAPIConfiguration_PublishesEventWithoutMutatingMemoryStore(t *test
 	store := storage.NewConfigStore()
 	db := setupSQLiteDBForAPIDeploymentTests(t)
 	hub := &mockEventHub{}
-	service := NewAPIDeploymentService(store, db, nil, nil, hub)
+	service := NewAPIDeploymentService(store, db, nil, nil, hub, constants.PlatformGatewayId)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	var spec api.APIConfiguration_Spec
@@ -641,7 +642,7 @@ func TestDeleteAPIConfiguration_ByAPIIDPublishesEventWithoutMutatingMemoryStore(
 	store := storage.NewConfigStore()
 	db := setupSQLiteDBForAPIDeploymentTests(t)
 	hub := &mockEventHub{}
-	service := NewAPIDeploymentService(store, db, nil, nil, hub)
+	service := NewAPIDeploymentService(store, db, nil, nil, hub, constants.PlatformGatewayId)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	var spec api.APIConfiguration_Spec
@@ -721,7 +722,7 @@ func TestUndeployAPIConfiguration_NotFound(t *testing.T) {
 	store := storage.NewConfigStore()
 	db := setupSQLiteDBForAPIDeploymentTests(t)
 	hub := &mockEventHub{}
-	service := NewAPIDeploymentService(store, db, nil, nil, hub)
+	service := NewAPIDeploymentService(store, db, nil, nil, hub, constants.PlatformGatewayId)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	result, err := service.UndeployAPIConfiguration(APIUndeploymentParams{
@@ -740,7 +741,7 @@ func TestUndeployAPIConfiguration_PublishesEventWithoutMutatingMemoryStore(t *te
 	store := storage.NewConfigStore()
 	db := setupSQLiteDBForAPIDeploymentTests(t)
 	hub := &mockEventHub{}
-	service := NewAPIDeploymentService(store, db, nil, nil, hub)
+	service := NewAPIDeploymentService(store, db, nil, nil, hub, constants.PlatformGatewayId)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	var spec api.APIConfiguration_Spec

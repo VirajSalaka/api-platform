@@ -368,7 +368,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		eventHubGatewayID := eventhub.ResolveGatewayID(eventHubStorage.GetGatewayID())
+		eventHubGatewayID := cfg.Controller.Server.GatewayID
 		if err := eventHubInstance.RegisterGateway(eventHubGatewayID); err != nil {
 			log.Warn("Failed to register gateway for event hub tracking",
 				slog.String("gateway_id", eventHubGatewayID),

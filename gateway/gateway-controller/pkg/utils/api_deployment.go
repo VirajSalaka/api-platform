@@ -95,6 +95,7 @@ type APIDeploymentService struct {
 	routerConfig *config.RouterConfig
 	httpClient   *http.Client
 	eventHub     eventhub.EventHub
+	gatewayID    string
 }
 
 // NewAPIDeploymentService creates a new API deployment service
@@ -104,7 +105,13 @@ func NewAPIDeploymentService(
 	validator config.Validator,
 	routerConfig *config.RouterConfig,
 	hub eventhub.EventHub,
+	gatewayID ...string,
 ) *APIDeploymentService {
+	resolvedGatewayID := ""
+	if len(gatewayID) > 0 {
+		resolvedGatewayID = strings.TrimSpace(gatewayID[0])
+	}
+
 	return &APIDeploymentService{
 		store:        store,
 		db:           db,
@@ -113,6 +120,7 @@ func NewAPIDeploymentService(
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
 		routerConfig: routerConfig,
 		eventHub:     hub,
+		gatewayID:    resolvedGatewayID,
 	}
 }
 
@@ -122,9 +130,13 @@ func (s *APIDeploymentService) publishEvent(eventType eventhub.EventType, action
 		return
 	}
 
-	gatewayID := eventhub.DefaultGatewayID
-	if s.db != nil {
-		gatewayID = eventhub.ResolveGatewayID(s.db.GetGatewayID())
+	gatewayID := strings.TrimSpace(s.gatewayID)
+	if gatewayID == "" {
+		logger.Warn("Skipping event hub publish because gateway ID is not configured",
+			slog.String("event_type", string(eventType)),
+			slog.String("action", action),
+			slog.String("entity_id", entityID))
+		return
 	}
 
 	event := eventhub.Event{
