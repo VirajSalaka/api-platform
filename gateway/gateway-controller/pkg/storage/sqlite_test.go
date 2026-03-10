@@ -117,6 +117,24 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 	assert.NilError(t, err)
 	assert.Assert(t, !hasEventType, "events table should not include event_type column")
 
+	var hasGatewayID bool
+	err = storage.db.QueryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('events')
+		WHERE name = 'gateway_id'
+	`).Scan(&hasGatewayID)
+	assert.NilError(t, err)
+	assert.Assert(t, hasGatewayID, "events table should include gateway_id column")
+
+	var hasGatewayStateID bool
+	err = storage.db.QueryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('gateway_states')
+		WHERE name = 'gateway_id'
+	`).Scan(&hasGatewayStateID)
+	assert.NilError(t, err)
+	assert.Assert(t, hasGatewayStateID, "gateway_states table should include gateway_id column")
+
 	var correlationIDIsPrimaryKey bool
 	err = storage.db.QueryRow(`
 		SELECT COUNT(*) > 0
@@ -133,7 +151,7 @@ func TestSQLiteStorage_SchemaInitialization(t *testing.T) {
 		"certificates",
 		"llm_provider_templates",
 		"api_keys",
-		"organization_states",
+		"gateway_states",
 		"events",
 	}
 

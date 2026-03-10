@@ -124,6 +124,10 @@ func (m *mockStorageForDeletion) GetDB() *sql.DB {
 	return nil
 }
 
+func (m *mockStorageForDeletion) GetGatewayID() string {
+	return ""
+}
+
 func (m *mockStorageForDeletion) Close() error {
 	return nil
 }
@@ -243,7 +247,7 @@ func (m *mockEventHubForDelete) Initialize() error {
 	return nil
 }
 
-func (m *mockEventHubForDelete) RegisterOrganization(orgID string) error {
+func (m *mockEventHubForDelete) RegisterGateway(gatewayID string) error {
 	return nil
 }
 

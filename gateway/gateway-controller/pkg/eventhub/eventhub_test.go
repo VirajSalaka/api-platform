@@ -38,13 +38,13 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 	// Create required tables
 	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS organization_states (
-			organization TEXT PRIMARY KEY,
+		CREATE TABLE IF NOT EXISTS gateway_states (
+			gateway_id TEXT PRIMARY KEY,
 			version_id TEXT NOT NULL DEFAULT '',
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE TABLE IF NOT EXISTS events (
-			organization_id TEXT NOT NULL,
+			gateway_id TEXT NOT NULL,
 			processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			originated_timestamp TIMESTAMP NOT NULL,
 			entity_type TEXT NOT NULL,
@@ -52,7 +52,8 @@ func setupTestDB(t *testing.T) *sql.DB {
 			entity_id TEXT NOT NULL,
 			correlation_id TEXT NOT NULL,
 			event_data TEXT NOT NULL,
-			PRIMARY KEY (correlation_id)
+			PRIMARY KEY (correlation_id),
+			UNIQUE (gateway_id, processed_timestamp)
 		);
 	`)
 	require.NoError(t, err)
@@ -65,7 +66,7 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-func TestRegisterOrganization(t *testing.T) {
+func TestRegisterGateway(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()
 
@@ -73,14 +74,14 @@ func TestRegisterOrganization(t *testing.T) {
 	require.NoError(t, hub.Initialize())
 	defer hub.Close()
 
-	err := hub.RegisterOrganization("test-org")
+	err := hub.RegisterGateway("test-org")
 	assert.NoError(t, err)
 
 	// Verify in database
-	var org string
-	err = db.QueryRow("SELECT organization FROM organization_states WHERE organization = ?", "test-org").Scan(&org)
+	var gatewayID string
+	err = db.QueryRow("SELECT gateway_id FROM gateway_states WHERE gateway_id = ?", "test-org").Scan(&gatewayID)
 	assert.NoError(t, err)
-	assert.Equal(t, "test-org", org)
+	assert.Equal(t, "test-org", gatewayID)
 }
 
 func TestPublishAndSubscribe(t *testing.T) {
@@ -96,8 +97,7 @@ func TestPublishAndSubscribe(t *testing.T) {
 	require.NoError(t, hub.Initialize())
 	defer hub.Close()
 
-	// Register org
-	require.NoError(t, hub.RegisterOrganization("test-org"))
+	require.NoError(t, hub.RegisterGateway("test-org"))
 
 	// Subscribe
 	ch, err := hub.Subscribe("test-org")
@@ -105,7 +105,7 @@ func TestPublishAndSubscribe(t *testing.T) {
 
 	// Publish event
 	event := Event{
-		OrganizationID:      "test-org",
+		GatewayID:           "test-org",
 		OriginatedTimestamp: time.Now(),
 		EventType:           EventTypeAPI,
 		Action:              "CREATE",
@@ -135,12 +135,12 @@ func TestCleanUpEvents(t *testing.T) {
 	require.NoError(t, hub.Initialize())
 	defer hub.Close()
 
-	require.NoError(t, hub.RegisterOrganization("test-org"))
+	require.NoError(t, hub.RegisterGateway("test-org"))
 
 	// Insert old event directly
 	oldTime := time.Now().Add(-2 * time.Hour)
 	_, err := db.Exec(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, "test-org", oldTime, oldTime, "API", "CREATE", "old-api", "cleanup-old-api", "{}")
 	require.NoError(t, err)
@@ -163,7 +163,7 @@ func TestAtomicPublish(t *testing.T) {
 	require.NoError(t, hub.Initialize())
 	defer hub.Close()
 
-	require.NoError(t, hub.RegisterOrganization("test-org"))
+	require.NoError(t, hub.RegisterGateway("test-org"))
 
 	// Publish event
 	event := Event{
@@ -177,12 +177,12 @@ func TestAtomicPublish(t *testing.T) {
 
 	// Verify both event and version were updated atomically
 	var eventCount int
-	err := db.QueryRow("SELECT COUNT(*) FROM events WHERE organization_id = 'test-org'").Scan(&eventCount)
+	err := db.QueryRow("SELECT COUNT(*) FROM events WHERE gateway_id = 'test-org'").Scan(&eventCount)
 	require.NoError(t, err)
 	assert.Equal(t, 1, eventCount)
 
 	var versionID string
-	err = db.QueryRow("SELECT version_id FROM organization_states WHERE organization = 'test-org'").Scan(&versionID)
+	err = db.QueryRow("SELECT version_id FROM gateway_states WHERE gateway_id = 'test-org'").Scan(&versionID)
 	require.NoError(t, err)
 	assert.NotEmpty(t, versionID)
 }
@@ -195,7 +195,7 @@ func TestPublishDefaultsEmptyEventData(t *testing.T) {
 	require.NoError(t, hub.Initialize())
 	defer hub.Close()
 
-	require.NoError(t, hub.RegisterOrganization("test-org"))
+	require.NoError(t, hub.RegisterGateway("test-org"))
 
 	event := Event{
 		OriginatedTimestamp: time.Now(),
@@ -207,7 +207,7 @@ func TestPublishDefaultsEmptyEventData(t *testing.T) {
 	require.NoError(t, hub.PublishEvent("test-org", event))
 
 	var storedEventData string
-	err := db.QueryRow("SELECT event_data FROM events WHERE organization_id = ? AND entity_id = ?", "test-org", "api-default-eventdata").Scan(&storedEventData)
+	err := db.QueryRow("SELECT event_data FROM events WHERE gateway_id = ? AND entity_id = ?", "test-org", "api-default-eventdata").Scan(&storedEventData)
 	require.NoError(t, err)
 	assert.Equal(t, EmptyEventData, storedEventData)
 }
@@ -225,7 +225,7 @@ func TestMultipleSubscribers(t *testing.T) {
 	require.NoError(t, hub.Initialize())
 	defer hub.Close()
 
-	require.NoError(t, hub.RegisterOrganization("test-org"))
+	require.NoError(t, hub.RegisterGateway("test-org"))
 
 	// Subscribe twice
 	ch1, err := hub.Subscribe("test-org")
@@ -261,7 +261,7 @@ func TestGracefulShutdown(t *testing.T) {
 	hub := New(db, logger, DefaultConfig())
 	require.NoError(t, hub.Initialize())
 
-	require.NoError(t, hub.RegisterOrganization("test-org"))
+	require.NoError(t, hub.RegisterGateway("test-org"))
 	_, err := hub.Subscribe("test-org")
 	require.NoError(t, err)
 
@@ -283,7 +283,7 @@ func TestMultipleEventTypes(t *testing.T) {
 	require.NoError(t, hub.Initialize())
 	defer hub.Close()
 
-	require.NoError(t, hub.RegisterOrganization("test-org"))
+	require.NoError(t, hub.RegisterGateway("test-org"))
 
 	ch, err := hub.Subscribe("test-org")
 	require.NoError(t, err)
@@ -316,28 +316,28 @@ func TestMultipleEventTypes(t *testing.T) {
 	assert.Len(t, received, 3)
 }
 
-func TestPollOrganizationsKeysetPagination(t *testing.T) {
+func TestPollGatewaysKeysetPagination(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()
 
 	backendConfig := DefaultSQLBackendConfig()
-	backendConfig.OrganizationStatePageSize = 50
+	backendConfig.GatewayStatePageSize = 50
 	backend := NewSQLBackend(db, logger, backendConfig)
 	require.NoError(t, backend.prepareStatements())
 	t.Cleanup(func() {
 		_ = backend.Close()
 	})
 
-	const orgCount = 210
-	subscribers := make(map[string]<-chan Event, orgCount)
+	const gatewayCount = 210
+	subscribers := make(map[string]<-chan Event, gatewayCount)
 
-	for i := 0; i < orgCount; i++ {
-		orgID := fmt.Sprintf("org-%03d", i)
-		require.NoError(t, backend.RegisterOrganization(orgID))
+	for i := 0; i < gatewayCount; i++ {
+		gatewayID := fmt.Sprintf("org-%03d", i)
+		require.NoError(t, backend.RegisterGateway(gatewayID))
 
-		ch, err := backend.Subscribe(orgID)
+		ch, err := backend.Subscribe(gatewayID)
 		require.NoError(t, err)
-		subscribers[orgID] = ch
+		subscribers[gatewayID] = ch
 
 		event := Event{
 			OriginatedTimestamp: time.Now(),
@@ -346,22 +346,22 @@ func TestPollOrganizationsKeysetPagination(t *testing.T) {
 			EntityID:            fmt.Sprintf("entity-%03d", i),
 			EventData:           "{}",
 		}
-		require.NoError(t, backend.Publish(orgID, event))
+		require.NoError(t, backend.Publish(gatewayID, event))
 	}
 
-	backend.pollOrganizations()
+	backend.pollGateways()
 
-	for orgID, ch := range subscribers {
+	for gatewayID, ch := range subscribers {
 		select {
 		case evt := <-ch:
-			assert.Equal(t, orgID, evt.OrganizationID)
+			assert.Equal(t, gatewayID, evt.GatewayID)
 		case <-time.After(2 * time.Second):
-			t.Fatalf("timed out waiting for event for %s", orgID)
+			t.Fatalf("timed out waiting for event for %s", gatewayID)
 		}
 	}
 }
 
-func TestPollOrganizationWithStateFirstPollUsesSkewWindow(t *testing.T) {
+func TestPollGatewayWithStateFirstPollUsesSkewWindow(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()
 
@@ -371,7 +371,7 @@ func TestPollOrganizationWithStateFirstPollUsesSkewWindow(t *testing.T) {
 		_ = backend.Close()
 	})
 
-	require.NoError(t, backend.RegisterOrganization("test-org"))
+	require.NoError(t, backend.RegisterGateway("test-org"))
 	ch, err := backend.Subscribe("test-org")
 	require.NoError(t, err)
 
@@ -379,7 +379,7 @@ func TestPollOrganizationWithStateFirstPollUsesSkewWindow(t *testing.T) {
 	oldTs := now.Add(-2 * time.Minute)
 	recentTs := now.Add(-15 * time.Second)
 	_, err = db.Exec(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "state-skew-old", "{}",
@@ -387,14 +387,14 @@ func TestPollOrganizationWithStateFirstPollUsesSkewWindow(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	org, err := backend.registry.get("test-org")
+	gateway, err := backend.registry.get("test-org")
 	require.NoError(t, err)
 
-	state := OrganizationState{
-		Organization: "test-org",
-		VersionID:    "v1",
+	state := GatewayState{
+		GatewayID: "test-org",
+		VersionID: "v1",
 	}
-	require.NoError(t, backend.pollOrganizationWithState(org, state))
+	require.NoError(t, backend.pollGatewayWithState(gateway, state))
 
 	select {
 	case evt := <-ch:
@@ -410,7 +410,7 @@ func TestPollOrganizationWithStateFirstPollUsesSkewWindow(t *testing.T) {
 	}
 }
 
-func TestPollOrganizationWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
+func TestPollGatewayWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()
 
@@ -420,7 +420,7 @@ func TestPollOrganizationWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 		_ = backend.Close()
 	})
 
-	require.NoError(t, backend.RegisterOrganization("test-org"))
+	require.NoError(t, backend.RegisterGateway("test-org"))
 	ch, err := backend.Subscribe("test-org")
 	require.NoError(t, err)
 
@@ -428,7 +428,7 @@ func TestPollOrganizationWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	oldTs := now.Add(-2 * time.Minute)
 	recentTs := now.Add(-10 * time.Second)
 	_, err = db.Exec(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		"test-org", oldTs, oldTs, "API", "CREATE", "old-entity", "unix-seconds-old", "{}",
@@ -436,15 +436,15 @@ func TestPollOrganizationWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	org, err := backend.registry.get("test-org")
+	gateway, err := backend.registry.get("test-org")
 	require.NoError(t, err)
-	org.lastPolled = now.Add(-30 * time.Second).Unix()
+	gateway.lastPolled = now.Add(-30 * time.Second).Unix()
 
-	state := OrganizationState{
-		Organization: "test-org",
-		VersionID:    "v2",
+	state := GatewayState{
+		GatewayID: "test-org",
+		VersionID: "v2",
 	}
-	require.NoError(t, backend.pollOrganizationWithState(org, state))
+	require.NoError(t, backend.pollGatewayWithState(gateway, state))
 
 	select {
 	case evt := <-ch:
@@ -460,7 +460,7 @@ func TestPollOrganizationWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	}
 }
 
-func TestPollOrganizationWithStateRetriesDeferredEventsFromLastDeliveredTimestamp(t *testing.T) {
+func TestPollGatewayWithStateRetriesDeferredEventsFromLastDeliveredTimestamp(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()
 
@@ -470,7 +470,7 @@ func TestPollOrganizationWithStateRetriesDeferredEventsFromLastDeliveredTimestam
 		_ = backend.Close()
 	})
 
-	require.NoError(t, backend.RegisterOrganization("test-org"))
+	require.NoError(t, backend.RegisterGateway("test-org"))
 
 	ch := make(chan Event, 1)
 	require.NoError(t, backend.registry.addSubscriber("test-org", ch))
@@ -478,7 +478,7 @@ func TestPollOrganizationWithStateRetriesDeferredEventsFromLastDeliveredTimestam
 	firstTs := time.Now().Add(-2 * time.Second)
 	secondTs := firstTs.Add(10 * time.Millisecond)
 	_, err := db.Exec(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		"test-org", firstTs, firstTs, "API", "CREATE", "first-entity", "deferred-first", "{}",
@@ -486,35 +486,35 @@ func TestPollOrganizationWithStateRetriesDeferredEventsFromLastDeliveredTimestam
 	)
 	require.NoError(t, err)
 
-	org, err := backend.registry.get("test-org")
+	gateway, err := backend.registry.get("test-org")
 	require.NoError(t, err)
 
-	state := OrganizationState{
-		Organization: "test-org",
-		VersionID:    "v1",
+	state := GatewayState{
+		GatewayID: "test-org",
+		VersionID: "v1",
 	}
 
-	require.NoError(t, backend.pollOrganizationWithState(org, state))
+	require.NoError(t, backend.pollGatewayWithState(gateway, state))
 
 	select {
 	case evt := <-ch:
 		assert.Equal(t, "first-entity", evt.EntityID)
-		assert.Equal(t, evt.ProcessedTimestamp.UnixNano(), org.lastPolled)
+		assert.Equal(t, evt.ProcessedTimestamp.UnixNano(), gateway.lastPolled)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for first event")
 	}
-	assert.Empty(t, org.knownVersion)
+	assert.Empty(t, gateway.knownVersion)
 
-	require.NoError(t, backend.pollOrganizationWithState(org, state))
+	require.NoError(t, backend.pollGatewayWithState(gateway, state))
 
 	select {
 	case evt := <-ch:
 		assert.Equal(t, "second-entity", evt.EntityID)
-		assert.Equal(t, evt.ProcessedTimestamp.UnixNano(), org.lastPolled)
+		assert.Equal(t, evt.ProcessedTimestamp.UnixNano(), gateway.lastPolled)
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for second event")
 	}
-	assert.Equal(t, "v1", org.knownVersion)
+	assert.Equal(t, "v1", gateway.knownVersion)
 
 	select {
 	case evt := <-ch:

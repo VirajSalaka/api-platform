@@ -23,103 +23,83 @@ import (
 	"sync"
 )
 
-// Sentinel errors for organization operations
+// Sentinel errors for gateway operations.
 var (
-	ErrOrganizationNotFound      = errors.New("organization not found")
-	ErrOrganizationAlreadyExists = errors.New("organization already exists")
+	ErrGatewayNotFound      = errors.New("gateway not found")
+	ErrGatewayAlreadyExists = errors.New("gateway already exists")
 )
 
-// organization tracks an organization and its subscribers
-type organization struct {
+// gateway tracks a gateway and its subscribers.
+type gateway struct {
 	id           string
 	subscribers  []chan Event
 	knownVersion string
 	lastPolled   int64
 }
 
-// organizationRegistry manages organization registrations and subscribers
-type organizationRegistry struct {
-	mu    sync.RWMutex
-	orgs  map[string]*organization
+// gatewayRegistry manages gateway registrations and subscribers.
+type gatewayRegistry struct {
+	mu       sync.RWMutex
+	gateways map[string]*gateway
 }
 
-// newOrganizationRegistry creates a new organization registry
-func newOrganizationRegistry() *organizationRegistry {
-	return &organizationRegistry{
-		orgs: make(map[string]*organization),
+// newGatewayRegistry creates a new gateway registry.
+func newGatewayRegistry() *gatewayRegistry {
+	return &gatewayRegistry{
+		gateways: make(map[string]*gateway),
 	}
 }
 
-// register adds a new organization to the registry
-func (r *organizationRegistry) register(orgID string) error {
+// register adds a new gateway to the registry.
+func (r *gatewayRegistry) register(gatewayID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if _, exists := r.orgs[orgID]; exists {
-		return ErrOrganizationAlreadyExists
+	if _, exists := r.gateways[gatewayID]; exists {
+		return ErrGatewayAlreadyExists
 	}
 
-	r.orgs[orgID] = &organization{
-		id:          orgID,
+	r.gateways[gatewayID] = &gateway{
+		id:          gatewayID,
 		subscribers: make([]chan Event, 0),
 	}
 	return nil
 }
 
-// get returns the organization for the given ID
-func (r *organizationRegistry) get(orgID string) (*organization, error) {
+// get returns the gateway for the given ID.
+func (r *gatewayRegistry) get(gatewayID string) (*gateway, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	org, exists := r.orgs[orgID]
+	gw, exists := r.gateways[gatewayID]
 	if !exists {
-		return nil, ErrOrganizationNotFound
+		return nil, ErrGatewayNotFound
 	}
-	return org, nil
+	return gw, nil
 }
 
-// addSubscriber adds a subscriber channel for an organization
-func (r *organizationRegistry) addSubscriber(orgID string, ch chan Event) error {
+// addSubscriber adds a subscriber channel for a gateway.
+func (r *gatewayRegistry) addSubscriber(gatewayID string, ch chan Event) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	org, exists := r.orgs[orgID]
+	gw, exists := r.gateways[gatewayID]
 	if !exists {
-		return ErrOrganizationNotFound
+		return ErrGatewayNotFound
 	}
 
-	org.subscribers = append(org.subscribers, ch)
+	gw.subscribers = append(gw.subscribers, ch)
 	return nil
 }
 
-// removeSubscriber removes a subscriber channel for an organization
-func (r *organizationRegistry) removeSubscriber(orgID string, ch chan Event) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	org, exists := r.orgs[orgID]
-	if !exists {
-		return ErrOrganizationNotFound
-	}
-
-	for i, sub := range org.subscribers {
-		if sub == ch {
-			org.subscribers = append(org.subscribers[:i], org.subscribers[i+1:]...)
-			close(ch)
-			return nil
-		}
-	}
-	return nil
-}
-
-// getAll returns all registered organizations
-func (r *organizationRegistry) getAll() []*organization {
+// getAll returns all registered gateways.
+func (r *gatewayRegistry) getAll() []*gateway {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	orgs := make([]*organization, 0, len(r.orgs))
-	for _, org := range r.orgs {
-		orgs = append(orgs, org)
+	gateways := make([]*gateway, 0, len(r.gateways))
+	for _, gw := range r.gateways {
+		gateways = append(gateways, gw)
 	}
-	return orgs
+	return gateways
 }

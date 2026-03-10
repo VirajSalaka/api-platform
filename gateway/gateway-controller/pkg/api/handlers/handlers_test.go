@@ -61,7 +61,7 @@ type mockEventHub struct {
 
 func (m *mockEventHub) Initialize() error { return nil }
 
-func (m *mockEventHub) RegisterOrganization(orgID string) error { return nil }
+func (m *mockEventHub) RegisterGateway(gatewayID string) error { return nil }
 
 func (m *mockEventHub) PublishEvent(orgID string, event eventhub.Event) error {
 	m.mu.Lock()
@@ -411,6 +411,10 @@ func (m *MockStorage) DeleteCertificate(id string) error {
 
 func (m *MockStorage) GetDB() *sql.DB {
 	return nil
+}
+
+func (m *MockStorage) GetGatewayID() string {
+	return ""
 }
 
 func (m *MockStorage) Close() error {

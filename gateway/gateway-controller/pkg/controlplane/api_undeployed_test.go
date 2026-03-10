@@ -37,7 +37,7 @@ func (m *mockEventHubForUndeploy) Initialize() error {
 	return nil
 }
 
-func (m *mockEventHubForUndeploy) RegisterOrganization(orgID string) error {
+func (m *mockEventHubForUndeploy) RegisterGateway(gatewayID string) error {
 	return nil
 }
 

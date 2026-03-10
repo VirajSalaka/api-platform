@@ -196,8 +196,13 @@ func (s *APIKeyService) publishAPIKeyEvent(action, entityID, correlationID strin
 		logger = slog.Default()
 	}
 
+	gatewayID := eventhub.DefaultGatewayID
+	if s.db != nil {
+		gatewayID = eventhub.ResolveGatewayID(s.db.GetGatewayID())
+	}
+
 	event := eventhub.Event{
-		OrganizationID:      "default",
+		GatewayID:           gatewayID,
 		OriginatedTimestamp: time.Now(),
 		EventType:           eventhub.EventTypeAPIKey,
 		Action:              action,
@@ -206,14 +211,16 @@ func (s *APIKeyService) publishAPIKeyEvent(action, entityID, correlationID strin
 		EventData:           eventhub.EmptyEventData,
 	}
 
-	if err := s.eventHub.PublishEvent("default", event); err != nil {
+	if err := s.eventHub.PublishEvent(gatewayID, event); err != nil {
 		logger.Warn("Failed to publish event to event hub",
+			slog.String("gateway_id", gatewayID),
 			slog.String("event_type", string(eventhub.EventTypeAPIKey)),
 			slog.String("action", action),
 			slog.String("entity_id", entityID),
 			slog.Any("error", err))
 	} else {
 		logger.Debug("Published event to event hub",
+			slog.String("gateway_id", gatewayID),
 			slog.String("event_type", string(eventhub.EventTypeAPIKey)),
 			slog.String("action", action),
 			slog.String("entity_id", entityID))

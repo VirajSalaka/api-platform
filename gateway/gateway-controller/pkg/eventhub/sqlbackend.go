@@ -48,17 +48,17 @@ type SQLBackend struct {
 	config   SQLBackendConfig
 	bindType int
 
-	registry *organizationRegistry
+	registry *gatewayRegistry
 
 	// Prepared statements
-	stmtMu               sync.RWMutex
-	insertEventStmt      *sql.Stmt
-	updateOrgVersionStmt *sql.Stmt
-	getOrgStateStmt      *sql.Stmt
-	getOrgStatesPageStmt *sql.Stmt
-	getEventsStmt        *sql.Stmt
-	insertOrgStmt        *sql.Stmt
-	cleanupEventsStmt    *sql.Stmt
+	stmtMu                   sync.RWMutex
+	insertEventStmt          *sql.Stmt
+	updateGatewayVersionStmt *sql.Stmt
+	getGatewayStateStmt      *sql.Stmt
+	getGatewayStatesPageStmt *sql.Stmt
+	getEventsStmt            *sql.Stmt
+	insertGatewayStmt        *sql.Stmt
+	cleanupEventsStmt        *sql.Stmt
 
 	// Lifecycle
 	ctx    context.Context
@@ -89,7 +89,7 @@ func NewSQLBackend(db *sql.DB, logger *slog.Logger, config SQLBackendConfig) *SQ
 		logger:   logger,
 		config:   config,
 		bindType: bindTypeForDB(db),
-		registry: newOrganizationRegistry(),
+		registry: newGatewayRegistry(),
 		ctx:      ctx,
 		cancel:   cancel,
 	}
@@ -138,11 +138,11 @@ func (b *SQLBackend) Initialize() error {
 func (b *SQLBackend) closeStatements() {
 	stmts := []*sql.Stmt{
 		b.insertEventStmt,
-		b.updateOrgVersionStmt,
-		b.getOrgStateStmt,
-		b.getOrgStatesPageStmt,
+		b.updateGatewayVersionStmt,
+		b.getGatewayStateStmt,
+		b.getGatewayStatesPageStmt,
 		b.getEventsStmt,
-		b.insertOrgStmt,
+		b.insertGatewayStmt,
 		b.cleanupEventsStmt,
 	}
 	for _, stmt := range stmts {
@@ -161,53 +161,53 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	}()
 
 	b.insertEventStmt, err = b.db.Prepare(b.rebind(`
-		INSERT INTO events (organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare insert event statement: %w", err)
 	}
 
-	b.updateOrgVersionStmt, err = b.db.Prepare(b.rebind(`
-		UPDATE organization_states SET version_id = ?, updated_at = CURRENT_TIMESTAMP WHERE organization = ?
+	b.updateGatewayVersionStmt, err = b.db.Prepare(b.rebind(`
+		UPDATE gateway_states SET version_id = ?, updated_at = CURRENT_TIMESTAMP WHERE gateway_id = ?
 	`))
 	if err != nil {
-		return fmt.Errorf("failed to prepare update org version statement: %w", err)
+		return fmt.Errorf("failed to prepare update gateway version statement: %w", err)
 	}
 
-	b.getOrgStateStmt, err = b.db.Prepare(b.rebind(`
-		SELECT organization, version_id, updated_at FROM organization_states WHERE organization = ?
+	b.getGatewayStateStmt, err = b.db.Prepare(b.rebind(`
+		SELECT gateway_id, version_id, updated_at FROM gateway_states WHERE gateway_id = ?
 	`))
 	if err != nil {
-		return fmt.Errorf("failed to prepare get org state statement: %w", err)
+		return fmt.Errorf("failed to prepare get gateway state statement: %w", err)
 	}
 
-	b.getOrgStatesPageStmt, err = b.db.Prepare(b.rebind(`
-		SELECT organization, version_id, updated_at
-		FROM organization_states
-		WHERE organization > ?
-		ORDER BY organization ASC
+	b.getGatewayStatesPageStmt, err = b.db.Prepare(b.rebind(`
+		SELECT gateway_id, version_id, updated_at
+		FROM gateway_states
+		WHERE gateway_id > ?
+		ORDER BY gateway_id ASC
 		LIMIT ?
 	`))
 	if err != nil {
-		return fmt.Errorf("failed to prepare get org states page statement: %w", err)
+		return fmt.Errorf("failed to prepare get gateway states page statement: %w", err)
 	}
 
 	b.getEventsStmt, err = b.db.Prepare(b.rebind(`
-		SELECT organization_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data
+		SELECT gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, correlation_id, event_data
 		FROM events
-		WHERE organization_id = ? AND processed_timestamp > ?
+		WHERE gateway_id = ? AND processed_timestamp > ?
 		ORDER BY processed_timestamp ASC
 	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare get events statement: %w", err)
 	}
 
-	b.insertOrgStmt, err = b.db.Prepare(b.rebind(`
-		INSERT INTO organization_states (organization, version_id) VALUES (?, '')
+	b.insertGatewayStmt, err = b.db.Prepare(b.rebind(`
+		INSERT INTO gateway_states (gateway_id, version_id) VALUES (?, '')
 	`))
 	if err != nil {
-		return fmt.Errorf("failed to prepare insert org statement: %w", err)
+		return fmt.Errorf("failed to prepare insert gateway statement: %w", err)
 	}
 
 	b.cleanupEventsStmt, err = b.db.Prepare(b.rebind(`
@@ -220,33 +220,33 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	return nil
 }
 
-// RegisterOrganization registers a new organization for event tracking
-func (b *SQLBackend) RegisterOrganization(orgID string) error {
-	_, err := b.insertOrgStmt.Exec(orgID)
+// RegisterGateway registers a new gateway for event tracking.
+func (b *SQLBackend) RegisterGateway(gatewayID string) error {
+	_, err := b.insertGatewayStmt.Exec(gatewayID)
 	if err != nil {
-		// Insert failed — check if a concurrent registration already inserted the org.
-		checkErr := b.getOrgStateStmt.QueryRow(orgID).Scan(new(string), new(string), new(time.Time))
+		// Insert failed; check if a concurrent registration already inserted the gateway.
+		checkErr := b.getGatewayStateStmt.QueryRow(gatewayID).Scan(new(string), new(string), new(time.Time))
 		if checkErr == nil {
-			// Org exists; concurrent insert won the race — treat as success.
+			// Gateway exists; concurrent insert won the race, so treat it as success.
 			err = nil
 		} else if checkErr != sql.ErrNoRows {
-			return fmt.Errorf("failed to check organization existence after insert failure: %w", checkErr)
+			return fmt.Errorf("failed to check gateway existence after insert failure: %w", checkErr)
 		} else {
-			return fmt.Errorf("failed to register organization in database: %w", err)
+			return fmt.Errorf("failed to register gateway in database: %w", err)
 		}
 	}
 
 	// Register in local registry (ignore already exists)
-	if regErr := b.registry.register(orgID); regErr != nil && regErr != ErrOrganizationAlreadyExists {
-		return fmt.Errorf("failed to register organization in registry: %w", regErr)
+	if regErr := b.registry.register(gatewayID); regErr != nil && regErr != ErrGatewayAlreadyExists {
+		return fmt.Errorf("failed to register gateway in registry: %w", regErr)
 	}
 
-	b.logger.Info("Organization registered for event tracking", slog.String("organization", orgID))
+	b.logger.Info("Gateway registered for event tracking", slog.String("gateway_id", gatewayID))
 	return nil
 }
 
-// Publish publishes an event atomically (insert event + update org version)
-func (b *SQLBackend) Publish(orgID string, event Event) error {
+// Publish publishes an event atomically (insert event + update gateway version).
+func (b *SQLBackend) Publish(gatewayID string, event Event) error {
 	newVersion := uuid.New().String()
 	eventData := strings.TrimSpace(event.EventData)
 	if eventData == "" {
@@ -268,7 +268,7 @@ func (b *SQLBackend) Publish(orgID string, event Event) error {
 
 	// Insert event (explicitly pass processed_timestamp to ensure consistent time format with Go driver)
 	_, err = tx.Stmt(b.insertEventStmt).Exec(
-		orgID,
+		gatewayID,
 		time.Now(),
 		event.OriginatedTimestamp,
 		string(event.EventType),
@@ -281,10 +281,10 @@ func (b *SQLBackend) Publish(orgID string, event Event) error {
 		return fmt.Errorf("failed to insert event: %w", err)
 	}
 
-	// Update organization version
-	_, err = tx.Stmt(b.updateOrgVersionStmt).Exec(newVersion, orgID)
+	// Update gateway version
+	_, err = tx.Stmt(b.updateGatewayVersionStmt).Exec(newVersion, gatewayID)
 	if err != nil {
-		return fmt.Errorf("failed to update organization version: %w", err)
+		return fmt.Errorf("failed to update gateway version: %w", err)
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -292,7 +292,7 @@ func (b *SQLBackend) Publish(orgID string, event Event) error {
 	}
 
 	b.logger.Debug("Event published",
-		slog.String("organization", orgID),
+		slog.String("gateway_id", gatewayID),
 		slog.String("event_type", string(event.EventType)),
 		slog.String("action", event.Action),
 		slog.String("entity_id", event.EntityID),
@@ -301,22 +301,22 @@ func (b *SQLBackend) Publish(orgID string, event Event) error {
 	return nil
 }
 
-// Subscribe subscribes to events for an organization
-func (b *SQLBackend) Subscribe(orgID string) (<-chan Event, error) {
+// Subscribe subscribes to events for a gateway.
+func (b *SQLBackend) Subscribe(gatewayID string) (<-chan Event, error) {
 	ch := make(chan Event, 100)
 
-	if err := b.registry.addSubscriber(orgID, ch); err != nil {
+	if err := b.registry.addSubscriber(gatewayID, ch); err != nil {
 		close(ch)
-		return nil, fmt.Errorf("failed to subscribe to organization %s: %w", orgID, err)
+		return nil, fmt.Errorf("failed to subscribe to gateway %s: %w", gatewayID, err)
 	}
 
-	b.logger.Info("Subscribed to organization events", slog.String("organization", orgID))
+	b.logger.Info("Subscribed to gateway events", slog.String("gateway_id", gatewayID))
 	return ch, nil
 }
 
-// Unsubscribe removes the subscription for an organization
-func (b *SQLBackend) Unsubscribe(orgID string) error {
-	org, err := b.registry.get(orgID)
+// Unsubscribe removes the subscription for a gateway.
+func (b *SQLBackend) Unsubscribe(gatewayID string) error {
+	gw, err := b.registry.get(gatewayID)
 	if err != nil {
 		return err
 	}
@@ -325,10 +325,10 @@ func (b *SQLBackend) Unsubscribe(orgID string) error {
 	b.registry.mu.Lock()
 	defer b.registry.mu.Unlock()
 
-	for _, ch := range org.subscribers {
+	for _, ch := range gw.subscribers {
 		close(ch)
 	}
-	org.subscribers = nil
+	gw.subscribers = nil
 
 	return nil
 }
@@ -345,27 +345,27 @@ func (b *SQLBackend) pollLoop() {
 		case <-b.ctx.Done():
 			return
 		case <-ticker.C:
-			b.pollOrganizations()
+			b.pollGateways()
 		}
 	}
 }
 
-// pollOrganizations checks each registered organization for version changes
-func (b *SQLBackend) pollOrganizations() {
-	orgByID := make(map[string]*organization)
-	for _, org := range b.registry.getAll() {
-		orgByID[org.id] = org
+// pollGateways checks each registered gateway for version changes.
+func (b *SQLBackend) pollGateways() {
+	gatewayByID := make(map[string]*gateway)
+	for _, gw := range b.registry.getAll() {
+		gatewayByID[gw.id] = gw
 	}
-	if len(orgByID) == 0 {
+	if len(gatewayByID) == 0 {
 		return
 	}
 
-	pageSize := b.organizationStatePageSize()
+	pageSize := b.gatewayStatePageSize()
 	cursor := ""
 	for {
-		states, nextCursor, err := b.getOrganizationStatesPage(cursor, pageSize)
+		states, nextCursor, err := b.getGatewayStatesPage(cursor, pageSize)
 		if err != nil {
-			b.logger.Warn("Failed to poll organization states page",
+			b.logger.Warn("Failed to poll gateway states page",
 				slog.String("cursor", cursor),
 				slog.Any("error", err))
 			return
@@ -375,13 +375,13 @@ func (b *SQLBackend) pollOrganizations() {
 		}
 
 		for _, state := range states {
-			org, ok := orgByID[state.Organization]
+			gw, ok := gatewayByID[state.GatewayID]
 			if !ok {
 				continue
 			}
-			if err := b.pollOrganizationWithState(org, state); err != nil {
-				b.logger.Warn("Failed to poll organization",
-					slog.String("organization", org.id),
+			if err := b.pollGatewayWithState(gw, state); err != nil {
+				b.logger.Warn("Failed to poll gateway",
+					slog.String("gateway_id", gw.id),
 					slog.Any("error", err))
 			}
 		}
@@ -393,11 +393,11 @@ func (b *SQLBackend) pollOrganizations() {
 	}
 }
 
-func (b *SQLBackend) organizationStatePageSize() int {
-	if b.config.OrganizationStatePageSize > 0 {
-		return b.config.OrganizationStatePageSize
+func (b *SQLBackend) gatewayStatePageSize() int {
+	if b.config.GatewayStatePageSize > 0 {
+		return b.config.GatewayStatePageSize
 	}
-	return defaultOrganizationStatePageSize
+	return defaultGatewayStatePageSize
 }
 
 func subscriberChannelsAvailable(subscribers []chan Event) bool {
@@ -411,40 +411,40 @@ func subscriberChannelsAvailable(subscribers []chan Event) bool {
 	return true
 }
 
-func (b *SQLBackend) getOrganizationStatesPage(cursor string, limit int) ([]OrganizationState, string, error) {
-	// TODO: (VirajSalaka) We can even optimize this by only selecting organizations that have had updates since the last poll time,
-	// but that would require tracking last poll time per organization which adds complexity. For now, we can rely on the fact that
-	// organizations with no changes will be quickly skipped in pollOrganizationWithState.
-	rows, err := b.getOrgStatesPageStmt.Query(cursor, limit)
+func (b *SQLBackend) getGatewayStatesPage(cursor string, limit int) ([]GatewayState, string, error) {
+	// TODO: (VirajSalaka) We can even optimize this by only selecting gateways that have had updates since the last poll time,
+	// but that would require tracking last poll time per gateway which adds complexity. For now, we can rely on the fact that
+	// gateways with no changes will be quickly skipped in pollGatewayWithState.
+	rows, err := b.getGatewayStatesPageStmt.Query(cursor, limit)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to query organization states page: %w", err)
+		return nil, "", fmt.Errorf("failed to query gateway states page: %w", err)
 	}
 	defer rows.Close()
 
-	states := make([]OrganizationState, 0, limit)
+	states := make([]GatewayState, 0, limit)
 	nextCursor := ""
 	for rows.Next() {
-		var state OrganizationState
-		if err := rows.Scan(&state.Organization, &state.VersionID, &state.UpdatedAt); err != nil {
-			return nil, "", fmt.Errorf("failed to scan organization state row: %w", err)
+		var state GatewayState
+		if err := rows.Scan(&state.GatewayID, &state.VersionID, &state.UpdatedAt); err != nil {
+			return nil, "", fmt.Errorf("failed to scan gateway state row: %w", err)
 		}
 		states = append(states, state)
-		nextCursor = state.Organization
+		nextCursor = state.GatewayID
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("error iterating organization state rows: %w", err)
+		return nil, "", fmt.Errorf("error iterating gateway state rows: %w", err)
 	}
 
 	return states, nextCursor, nil
 }
 
-func (b *SQLBackend) pollOrganizationWithState(org *organization, state OrganizationState) error {
+func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error {
 	// Check if version has changed
 	b.registry.mu.RLock()
-	knownVersion := org.knownVersion
-	lastPolled := org.lastPolled
-	subscribers := make([]chan Event, len(org.subscribers))
-	copy(subscribers, org.subscribers)
+	knownVersion := gw.knownVersion
+	lastPolled := gw.lastPolled
+	subscribers := make([]chan Event, len(gw.subscribers))
+	copy(subscribers, gw.subscribers)
 	b.registry.mu.RUnlock()
 
 	if state.VersionID == knownVersion || state.VersionID == "" {
@@ -460,7 +460,7 @@ func (b *SQLBackend) pollOrganizationWithState(org *organization, state Organiza
 		lastPolledTime = time.Now().Add(-initialPollSkewWindow)
 	}
 
-	rows, err := b.getEventsStmt.Query(org.id, lastPolledTime)
+	rows, err := b.getEventsStmt.Query(gw.id, lastPolledTime)
 	if err != nil {
 		return fmt.Errorf("failed to query events: %w", err)
 	}
@@ -471,7 +471,7 @@ func (b *SQLBackend) pollOrganizationWithState(org *organization, state Organiza
 		var evt Event
 		var eventType string
 		if err := rows.Scan(
-			&evt.OrganizationID,
+			&evt.GatewayID,
 			&evt.ProcessedTimestamp,
 			&evt.OriginatedTimestamp,
 			&eventType,
@@ -501,7 +501,7 @@ func (b *SQLBackend) pollOrganizationWithState(org *organization, state Organiza
 		if !subscriberChannelsAvailable(subscribers) {
 			deliveryBlocked = true
 			b.logger.Warn("Subscriber channel full, deferring event delivery",
-				slog.String("organization", org.id),
+				slog.String("gateway_id", gw.id),
 				slog.String("entity_id", evt.EntityID))
 			break
 		}
@@ -516,21 +516,21 @@ func (b *SQLBackend) pollOrganizationWithState(org *organization, state Organiza
 	b.registry.mu.Lock()
 	if deliveryBlocked {
 		if !latestDeliveredTimestamp.IsZero() {
-			org.lastPolled = latestDeliveredTimestamp.UnixNano()
+			gw.lastPolled = latestDeliveredTimestamp.UnixNano()
 		} else {
-			org.lastPolled = lastPolledTime.UnixNano()
+			gw.lastPolled = lastPolledTime.UnixNano()
 		}
 	} else {
-		org.knownVersion = state.VersionID
+		gw.knownVersion = state.VersionID
 		if !latestDeliveredTimestamp.IsZero() {
-			org.lastPolled = latestDeliveredTimestamp.UnixNano()
+			gw.lastPolled = latestDeliveredTimestamp.UnixNano()
 		}
 	}
 	b.registry.mu.Unlock()
 
 	if deliveredCount > 0 {
 		b.logger.Debug("Delivered events to subscribers",
-			slog.String("organization", org.id),
+			slog.String("gateway_id", gw.id),
 			slog.Int("event_count", deliveredCount),
 			slog.Int("subscriber_count", len(subscribers)))
 	}
@@ -572,14 +572,14 @@ func (b *SQLBackend) Cleanup(retentionPeriod time.Duration) error {
 	return nil
 }
 
-// CleanupRange removes events for an organization before a given time
-func (b *SQLBackend) CleanupRange(orgID string, before time.Time) error {
+// CleanupRange removes events for a gateway before a given time.
+func (b *SQLBackend) CleanupRange(gatewayID string, before time.Time) error {
 	_, err := b.db.Exec(
-		b.rebind("DELETE FROM events WHERE organization_id = ? AND processed_timestamp < ?"),
-		orgID, before,
+		b.rebind("DELETE FROM events WHERE gateway_id = ? AND processed_timestamp < ?"),
+		gatewayID, before,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to clean up events for organization %s: %w", orgID, err)
+		return fmt.Errorf("failed to clean up events for gateway %s: %w", gatewayID, err)
 	}
 	return nil
 }
@@ -590,12 +590,12 @@ func (b *SQLBackend) Close() error {
 	b.wg.Wait()
 
 	// Close all subscriber channels
-	for _, org := range b.registry.getAll() {
+	for _, gw := range b.registry.getAll() {
 		b.registry.mu.Lock()
-		for _, ch := range org.subscribers {
+		for _, ch := range gw.subscribers {
 			close(ch)
 		}
-		org.subscribers = nil
+		gw.subscribers = nil
 		b.registry.mu.Unlock()
 	}
 

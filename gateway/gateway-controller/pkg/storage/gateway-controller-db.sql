@@ -188,16 +188,16 @@ CREATE INDEX IF NOT EXISTS idx_created_by ON api_keys(created_by);
 CREATE INDEX IF NOT EXISTS idx_api_key_source ON api_keys(source);
 CREATE INDEX IF NOT EXISTS idx_api_key_external_ref ON api_keys(external_ref_id);
 
--- Table for organization states (used by eventhub for multi-replica sync)
-CREATE TABLE IF NOT EXISTS organization_states (
-    organization TEXT PRIMARY KEY,
+-- Table for gateway states (used by eventhub for multi-replica sync)
+CREATE TABLE IF NOT EXISTS gateway_states (
+    gateway_id TEXT PRIMARY KEY,
     version_id TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Table for events (used by eventhub for multi-replica sync)
 CREATE TABLE IF NOT EXISTS events (
-    organization_id TEXT NOT NULL,
+    gateway_id TEXT NOT NULL,
     processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     originated_timestamp TIMESTAMP NOT NULL,
     entity_type TEXT NOT NULL,
@@ -205,8 +205,9 @@ CREATE TABLE IF NOT EXISTS events (
     entity_id TEXT NOT NULL,
     correlation_id TEXT NOT NULL,
     event_data TEXT NOT NULL,
-    PRIMARY KEY (correlation_id)
+    PRIMARY KEY (correlation_id),
+    UNIQUE (gateway_id, processed_timestamp)
 );
 
--- Set schema version to 10 (added organization_states and events tables for multi-replica sync)
+-- Set schema version to 10 (added gateway_states and events tables for multi-replica sync)
 PRAGMA user_version = 10;

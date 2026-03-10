@@ -235,6 +235,12 @@ type Storage interface {
 	// Returns an error if the certificate does not exist.
 	DeleteCertificate(id string) error
 
+	// TODO: (VirajSalaka) Do we need GetGatewayID to be in storage interface? It is just a configuration.
+
+	// GetGatewayID returns the configured gateway identifier for this storage instance.
+	// Returns an empty string when the storage is not scoped to a gateway.
+	GetGatewayID() string
+
 	// GetDB returns the underlying *sql.DB instance for direct database access.
 	// Returns nil for non-SQL backends (e.g., in-memory storage).
 	// Used by the eventhub package for event synchronization.

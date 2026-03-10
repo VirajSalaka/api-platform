@@ -90,8 +90,14 @@ func NewEventListener(
 
 // Start begins listening for events
 func (l *EventListener) Start() error {
-	// Subscribe to "default" organization events
-	ch, err := l.eventHub.Subscribe("default")
+	gatewayID := eventhub.DefaultGatewayID
+	if l.db != nil {
+		gatewayID = eventhub.ResolveGatewayID(l.db.GetGatewayID())
+	} else if l.systemConfig != nil {
+		gatewayID = eventhub.ResolveGatewayID(l.systemConfig.Controller.Server.GatewayID)
+	}
+
+	ch, err := l.eventHub.Subscribe(gatewayID)
 	if err != nil {
 		return err
 	}
@@ -100,7 +106,7 @@ func (l *EventListener) Start() error {
 	// Start processing goroutine
 	go l.processEvents()
 
-	l.logger.Info("Event listener started")
+	l.logger.Info("Event listener started", slog.String("gateway_id", gatewayID))
 	return nil
 }
 

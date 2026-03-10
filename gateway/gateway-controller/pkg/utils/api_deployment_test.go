@@ -68,7 +68,7 @@ type mockEventHub struct {
 
 func (m *mockEventHub) Initialize() error { return nil }
 
-func (m *mockEventHub) RegisterOrganization(orgID string) error { return nil }
+func (m *mockEventHub) RegisterGateway(gatewayID string) error { return nil }
 
 func (m *mockEventHub) PublishEvent(orgID string, event eventhub.Event) error {
 	m.mu.Lock()

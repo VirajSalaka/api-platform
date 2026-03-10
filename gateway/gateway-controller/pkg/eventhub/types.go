@@ -18,7 +18,10 @@
 
 package eventhub
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // EventType represents the type of event
 type EventType string
@@ -36,11 +39,15 @@ const (
 	// EmptyEventData is the canonical JSON payload for events that do not
 	// require additional data beyond the top-level event fields.
 	EmptyEventData = "{}"
+
+	// DefaultGatewayID is used when callers do not yet have a concrete
+	// configured gateway identifier available.
+	DefaultGatewayID = "default_gateway_id"
 )
 
 // Event represents a change event in the system
 type Event struct {
-	OrganizationID      string    `json:"organization_id"`
+	GatewayID           string    `json:"gateway_id"`
 	ProcessedTimestamp  time.Time `json:"processed_timestamp"`
 	OriginatedTimestamp time.Time `json:"originated_timestamp"`
 	EventType           EventType `json:"event_type"`
@@ -52,23 +59,23 @@ type Event struct {
 	EventData string `json:"event_data"`
 }
 
-// OrganizationState tracks the version state of an organization
-type OrganizationState struct {
-	Organization string    `json:"organization"`
-	VersionID    string    `json:"version_id"`
-	UpdatedAt    time.Time `json:"updated_at"`
+// GatewayState tracks the version state of a gateway.
+type GatewayState struct {
+	GatewayID string    `json:"gateway_id"`
+	VersionID string    `json:"version_id"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // EventHub defines the interface for event publishing and subscribing
 type EventHub interface {
 	// Initialize sets up the event hub
 	Initialize() error
-	// RegisterOrganization registers a new organization for event tracking
-	RegisterOrganization(orgID string) error
-	// PublishEvent publishes an event for an organization
-	PublishEvent(orgID string, event Event) error
-	// Subscribe subscribes to events for an organization
-	Subscribe(orgID string) (<-chan Event, error)
+	// RegisterGateway registers a new gateway for event tracking.
+	RegisterGateway(gatewayID string) error
+	// PublishEvent publishes an event for a gateway.
+	PublishEvent(gatewayID string, event Event) error
+	// Subscribe subscribes to events for a gateway.
+	Subscribe(gatewayID string) (<-chan Event, error)
 	// CleanUpEvents removes old events
 	CleanUpEvents() error
 	// Close gracefully shuts down the event hub
@@ -89,4 +96,16 @@ func DefaultConfig() Config {
 		CleanupInterval: 5 * time.Minute,
 		RetentionPeriod: 1 * time.Hour,
 	}
+}
+
+// TODO: (VirajSalaka) See if we need fallback here, 
+// since we can populate that in the Default Configuration
+
+// ResolveGatewayID normalizes a caller-provided gateway ID and falls back to
+// the default event hub gateway when none is available yet.
+func ResolveGatewayID(gatewayID string) string {
+	if resolved := strings.TrimSpace(gatewayID); resolved != "" {
+		return resolved
+	}
+	return DefaultGatewayID
 }
