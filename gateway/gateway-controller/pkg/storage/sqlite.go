@@ -755,8 +755,7 @@ func (s *SQLiteStorage) initSchema() error {
 				entity_id TEXT NOT NULL,
 				event_id TEXT NOT NULL,
 				event_data TEXT NOT NULL,
-				PRIMARY KEY (event_id),
-				UNIQUE (gateway_id, processed_timestamp)
+				PRIMARY KEY (event_id)
 			);`); err != nil {
 				return fmt.Errorf("failed to create events table: %w", err)
 			}

@@ -206,7 +206,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_id TEXT NOT NULL,
     event_data TEXT NOT NULL,
     PRIMARY KEY (event_id),
-    UNIQUE (gateway_id, processed_timestamp)
+    FOREIGN KEY (gateway_id) REFERENCES gateway_states(gateway_id) ON DELETE CASCADE
 );
 
 -- Set schema version to 10 (added gateway_states and events tables for multi-replica sync)

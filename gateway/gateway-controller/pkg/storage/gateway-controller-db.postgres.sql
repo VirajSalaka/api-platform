@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS events (
     event_id TEXT NOT NULL,
     event_data TEXT NOT NULL,
     PRIMARY KEY (event_id),
-    UNIQUE (gateway_id, processed_timestamp)
+    FOREIGN KEY (gateway_id) REFERENCES gateway_states(gateway_id) ON DELETE CASCADE
 );
 
 -- Migration-safe column additions for existing deployments

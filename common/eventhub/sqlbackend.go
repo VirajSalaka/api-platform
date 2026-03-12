@@ -57,6 +57,7 @@ type SQLBackend struct {
 	getGatewayStateStmt      *sql.Stmt
 	getGatewayStatesPageStmt *sql.Stmt
 	getEventsStmt            *sql.Stmt
+	getEventByIDStmt         *sql.Stmt
 	insertGatewayStmt        *sql.Stmt
 	cleanupEventsStmt        *sql.Stmt
 
@@ -142,6 +143,7 @@ func (b *SQLBackend) closeStatements() {
 		b.getGatewayStateStmt,
 		b.getGatewayStatesPageStmt,
 		b.getEventsStmt,
+		b.getEventByIDStmt,
 		b.insertGatewayStmt,
 		b.cleanupEventsStmt,
 	}
@@ -201,6 +203,13 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	`))
 	if err != nil {
 		return fmt.Errorf("failed to prepare get events statement: %w", err)
+	}
+
+	b.getEventByIDStmt, err = b.db.Prepare(b.rebind(`
+		SELECT event_id FROM events WHERE event_id = ?
+	`))
+	if err != nil {
+		return fmt.Errorf("failed to prepare get event by ID statement: %w", err)
 	}
 
 	b.insertGatewayStmt, err = b.db.Prepare(b.rebind(`
@@ -282,7 +291,27 @@ func (b *SQLBackend) Publish(gatewayID string, event Event) error {
 		eventData,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to insert event: %w", err)
+		insertErr := err
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && rollbackErr != sql.ErrTxDone {
+			return fmt.Errorf("failed to rollback event publish after insert failure: %w", rollbackErr)
+		}
+		err = nil
+
+		eventExists, checkErr := b.eventExists(eventID)
+		if checkErr != nil {
+			return fmt.Errorf("failed to check event existence after insert failure: %w", checkErr)
+		}
+		if eventExists {
+			b.logger.Info("Event already available, skipping duplicate publish",
+				slog.String("gateway_id", gatewayID),
+				slog.String("event_id", eventID),
+				slog.String("event_type", string(event.EventType)),
+				slog.String("action", event.Action),
+				slog.String("entity_id", event.EntityID))
+			return nil
+		}
+
+		return fmt.Errorf("failed to insert event: %w", insertErr)
 	}
 
 	// Update gateway version
@@ -303,6 +332,18 @@ func (b *SQLBackend) Publish(gatewayID string, event Event) error {
 		slog.String("new_version", newVersion))
 
 	return nil
+}
+
+func (b *SQLBackend) eventExists(eventID string) (bool, error) {
+	var existingEventID string
+	err := b.getEventByIDStmt.QueryRow(eventID).Scan(&existingEventID)
+	if err == nil {
+		return true, nil
+	}
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return false, err
 }
 
 // Subscribe subscribes to events for a gateway.

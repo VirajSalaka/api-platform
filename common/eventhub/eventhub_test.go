@@ -127,6 +127,54 @@ func TestPublishAndSubscribe(t *testing.T) {
 	}
 }
 
+func TestPublishDuplicateEventIsIdempotent(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	backend := NewSQLBackend(db, logger, DefaultSQLBackendConfig())
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	require.NoError(t, backend.RegisterGateway("test-org"))
+
+	event := Event{
+		GatewayID:           "test-org",
+		OriginatedTimestamp: time.Now(),
+		EventType:           EventTypeAPI,
+		Action:              "CREATE",
+		EntityID:            "api-123",
+		EventID:             "corr-duplicate-001",
+		EventData:           "{}",
+	}
+
+	require.NoError(t, backend.Publish("test-org", event))
+
+	var versionBeforeDuplicate string
+	require.NoError(t, db.QueryRow(
+		"SELECT version_id FROM gateway_states WHERE gateway_id = ?",
+		"test-org",
+	).Scan(&versionBeforeDuplicate))
+	require.NotEmpty(t, versionBeforeDuplicate)
+
+	require.NoError(t, backend.Publish("test-org", event))
+
+	var eventCount int
+	require.NoError(t, db.QueryRow(
+		"SELECT COUNT(*) FROM events WHERE event_id = ?",
+		event.EventID,
+	).Scan(&eventCount))
+	assert.Equal(t, 1, eventCount)
+
+	var versionAfterDuplicate string
+	require.NoError(t, db.QueryRow(
+		"SELECT version_id FROM gateway_states WHERE gateway_id = ?",
+		"test-org",
+	).Scan(&versionAfterDuplicate))
+	assert.Equal(t, versionBeforeDuplicate, versionAfterDuplicate)
+}
+
 func TestCleanUpEvents(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()
