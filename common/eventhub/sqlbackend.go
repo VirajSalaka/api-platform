@@ -198,7 +198,7 @@ func (b *SQLBackend) prepareStatements() (err error) {
 	b.getEventsStmt, err = b.db.Prepare(b.rebind(`
 		SELECT gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data
 		FROM events
-		WHERE gateway_id = ? AND processed_timestamp > ?
+		WHERE gateway_id = ? AND processed_timestamp >= ?
 		ORDER BY processed_timestamp ASC
 	`))
 	if err != nil {
@@ -498,6 +498,7 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 
 	// Fetch new events since last poll
 	var lastPolledTime time.Time
+	resumingFromLastPolled := lastPolled > 0
 	if lastPolled > 0 {
 		lastPolledTime = unixTimestampToTime(lastPolled)
 	} else {
@@ -535,6 +536,8 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("error iterating event rows: %w", err)
 	}
+
+	events = trimSingleBoundaryReplay(events, lastPolledTime, resumingFromLastPolled)
 
 	// TODO: (VirajSalaka) In the initial startup, we fetch the past events for 120 seconds.
 	// But if there are lot of events during the period, we need to capture the tail events.
@@ -583,6 +586,23 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 	}
 
 	return nil
+}
+
+// The poll query uses `processed_timestamp >= lastPolled` so a second event that
+// shares the last delivered timestamp is not missed. Results are ordered by
+// `processed_timestamp ASC`, so any boundary matches appear at the front: if
+// only the first row matches, it is the normal replay and we drop it; if the
+// first two rows match, we keep the full slice to preserve the overlap case.
+func trimSingleBoundaryReplay(events []Event, boundary time.Time, enabled bool) []Event {
+	if !enabled || len(events) == 0 || !events[0].ProcessedTimestamp.Equal(boundary) {
+		return events
+	}
+
+	if len(events) == 1 || !events[1].ProcessedTimestamp.Equal(boundary) {
+		return events[1:]
+	}
+
+	return events
 }
 
 // cleanupLoop periodically removes old events

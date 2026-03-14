@@ -62,6 +62,35 @@ func setupTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
+func setupTestDBAllowTimestampOverlap(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite3", ":memory:?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	require.NoError(t, err)
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS gateway_states (
+			gateway_id TEXT PRIMARY KEY,
+			version_id TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE IF NOT EXISTS events (
+			gateway_id TEXT NOT NULL,
+			processed_timestamp TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			originated_timestamp TIMESTAMP NOT NULL,
+			entity_type TEXT NOT NULL,
+			action TEXT NOT NULL CHECK(action IN ('CREATE', 'UPDATE', 'DELETE')),
+			entity_id TEXT NOT NULL,
+			event_id TEXT NOT NULL,
+			event_data TEXT NOT NULL,
+			PRIMARY KEY (event_id)
+		);
+	`)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
@@ -500,6 +529,112 @@ func TestPollGatewayWithStateSupportsUnixSecondsLastPolled(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for recent event")
 	}
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected additional event delivered: %s", evt.EntityID)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestPollGatewayWithStateDropsSingleBoundaryEvent(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	backend := NewSQLBackend(db, logger, DefaultSQLBackendConfig())
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	require.NoError(t, backend.RegisterGateway("test-org"))
+	ch, err := backend.Subscribe("test-org")
+	require.NoError(t, err)
+
+	boundaryTs := time.Now().Add(-2 * time.Second)
+	laterTs := boundaryTs.Add(10 * time.Millisecond)
+	_, err = db.Exec(`
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		"test-org", boundaryTs, boundaryTs, "API", "CREATE", "boundary-entity", "boundary-single", "{}",
+		"test-org", laterTs, laterTs, "API", "CREATE", "later-entity", "boundary-later", "{}",
+	)
+	require.NoError(t, err)
+
+	gateway, err := backend.registry.get("test-org")
+	require.NoError(t, err)
+	gateway.lastPolled = boundaryTs.UnixNano()
+
+	state := GatewayState{
+		GatewayID: "test-org",
+		VersionID: "v3",
+	}
+	require.NoError(t, backend.pollGatewayWithState(gateway, state))
+
+	select {
+	case evt := <-ch:
+		assert.Equal(t, "later-entity", evt.EntityID)
+		assert.Equal(t, laterTs.UnixNano(), gateway.lastPolled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for later event")
+	}
+	assert.Equal(t, "v3", gateway.knownVersion)
+
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected additional event delivered: %s", evt.EntityID)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestPollGatewayWithStateKeepsBoundaryOverlapEvents(t *testing.T) {
+	db := setupTestDBAllowTimestampOverlap(t)
+	logger := testLogger()
+
+	backend := NewSQLBackend(db, logger, DefaultSQLBackendConfig())
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	require.NoError(t, backend.RegisterGateway("test-org"))
+	ch, err := backend.Subscribe("test-org")
+	require.NoError(t, err)
+
+	boundaryTs := time.Now().Add(-2 * time.Second)
+	_, err = db.Exec(`
+		INSERT INTO events (gateway_id, processed_timestamp, originated_timestamp, entity_type, action, entity_id, event_id, event_data)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?)
+	`,
+		"test-org", boundaryTs, boundaryTs, "API", "CREATE", "overlap-first", "boundary-overlap-first", "{}",
+		"test-org", boundaryTs, boundaryTs, "API", "CREATE", "overlap-second", "boundary-overlap-second", "{}",
+	)
+	require.NoError(t, err)
+
+	gateway, err := backend.registry.get("test-org")
+	require.NoError(t, err)
+	gateway.lastPolled = boundaryTs.UnixNano()
+
+	state := GatewayState{
+		GatewayID: "test-org",
+		VersionID: "v4",
+	}
+	require.NoError(t, backend.pollGatewayWithState(gateway, state))
+
+	var received []string
+	for i := 0; i < 2; i++ {
+		select {
+		case evt := <-ch:
+			received = append(received, evt.EntityID)
+			assert.Equal(t, boundaryTs.UnixNano(), evt.ProcessedTimestamp.UnixNano())
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for overlap event")
+		}
+	}
+	assert.ElementsMatch(t, []string{"overlap-first", "overlap-second"}, received)
+	assert.Equal(t, boundaryTs.UnixNano(), gateway.lastPolled)
+	assert.Equal(t, "v4", gateway.knownVersion)
 
 	select {
 	case evt := <-ch:
