@@ -315,9 +315,13 @@ func (b *SQLBackend) Publish(gatewayID string, event Event) error {
 	}
 
 	// Update gateway version
-	_, err = tx.Stmt(b.updateGatewayVersionStmt).Exec(newVersion, gatewayID)
+	result, err := tx.Stmt(b.updateGatewayVersionStmt).Exec(newVersion, gatewayID)
 	if err != nil {
 		return fmt.Errorf("failed to update gateway version: %w", err)
+	}
+
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return fmt.Errorf("gateway %q is not registered", gatewayID)
 	}
 
 	if err = tx.Commit(); err != nil {
@@ -359,22 +363,31 @@ func (b *SQLBackend) Subscribe(gatewayID string) (<-chan Event, error) {
 	return ch, nil
 }
 
-// Unsubscribe removes the subscription for a gateway.
-func (b *SQLBackend) Unsubscribe(gatewayID string) error {
-	gw, err := b.registry.get(gatewayID)
+// Unsubscribe removes a specific subscription for a gateway.
+func (b *SQLBackend) Unsubscribe(gatewayID string, subscriber <-chan Event) error {
+	ch, err := b.registry.removeSubscriber(gatewayID, subscriber)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to unsubscribe from gateway %s: %w", gatewayID, err)
 	}
 
-	// Close and remove all subscribers
-	b.registry.mu.Lock()
-	defer b.registry.mu.Unlock()
+	close(ch)
 
-	for _, ch := range gw.subscribers {
+	b.logger.Info("Unsubscribed from gateway events", slog.String("gateway_id", gatewayID))
+	return nil
+}
+
+// UnsubscribeAll removes all subscriptions for a gateway.
+func (b *SQLBackend) UnsubscribeAll(gatewayID string) error {
+	subscribers, err := b.registry.removeAllSubscribers(gatewayID)
+	if err != nil {
+		return fmt.Errorf("failed to unsubscribe all from gateway %s: %w", gatewayID, err)
+	}
+
+	for _, ch := range subscribers {
 		close(ch)
 	}
-	gw.subscribers = nil
 
+	b.logger.Info("Unsubscribed all gateway events", slog.String("gateway_id", gatewayID))
 	return nil
 }
 
@@ -488,8 +501,6 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 	b.registry.mu.RLock()
 	knownVersion := gw.knownVersion
 	lastPolled := gw.lastPolled
-	subscribers := make([]chan Event, len(gw.subscribers))
-	copy(subscribers, gw.subscribers)
 	b.registry.mu.RUnlock()
 
 	if state.VersionID == knownVersion || state.VersionID == "" {
@@ -547,6 +558,9 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 	var latestDeliveredTimestamp time.Time
 	deliveredCount := 0
 	deliveryBlocked := false
+	deliveredSubscriberCount := 0
+	b.registry.mu.RLock()
+	subscribers := gw.subscribers
 	for _, evt := range events {
 		if !subscriberChannelsAvailable(subscribers) {
 			deliveryBlocked = true
@@ -558,9 +572,11 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 		for _, ch := range subscribers {
 			ch <- evt
 		}
+		deliveredSubscriberCount = len(subscribers)
 		latestDeliveredTimestamp = evt.ProcessedTimestamp
 		deliveredCount++
 	}
+	b.registry.mu.RUnlock()
 
 	// Update known version and last polled time
 	b.registry.mu.Lock()
@@ -582,7 +598,7 @@ func (b *SQLBackend) pollGatewayWithState(gw *gateway, state GatewayState) error
 		b.logger.Debug("Delivered events to subscribers",
 			slog.String("gateway_id", gw.id),
 			slog.Int("event_count", deliveredCount),
-			slog.Int("subscriber_count", len(subscribers)))
+			slog.Int("subscriber_count", deliveredSubscriberCount))
 	}
 
 	return nil

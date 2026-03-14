@@ -69,6 +69,10 @@ type EventHub interface {
 	PublishEvent(gatewayID string, event Event) error
 	// Subscribe subscribes to events for a gateway.
 	Subscribe(gatewayID string) (<-chan Event, error)
+	// Unsubscribe removes a specific subscription for a gateway.
+	Unsubscribe(gatewayID string, subscriber <-chan Event) error
+	// UnsubscribeAll removes all subscriptions for a gateway.
+	UnsubscribeAll(gatewayID string) error
 	// CleanUpEvents removes old events
 	CleanUpEvents() error
 	// Close gracefully shuts down the event hub

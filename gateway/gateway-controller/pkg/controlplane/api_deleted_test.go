@@ -275,6 +275,14 @@ func (m *mockEventHubForDelete) Subscribe(orgID string) (<-chan eventhub.Event, 
 	return ch, nil
 }
 
+func (m *mockEventHubForDelete) Unsubscribe(orgID string, subscriber <-chan eventhub.Event) error {
+	return nil
+}
+
+func (m *mockEventHubForDelete) UnsubscribeAll(orgID string) error {
+	return nil
+}
+
 func (m *mockEventHubForDelete) CleanUpEvents() error {
 	return nil
 }

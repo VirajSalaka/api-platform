@@ -54,6 +54,14 @@ func (m *mockEventHubForUndeploy) Subscribe(orgID string) (<-chan eventhub.Event
 	return ch, nil
 }
 
+func (m *mockEventHubForUndeploy) Unsubscribe(orgID string, subscriber <-chan eventhub.Event) error {
+	return nil
+}
+
+func (m *mockEventHubForUndeploy) UnsubscribeAll(orgID string) error {
+	return nil
+}
+
 func (m *mockEventHubForUndeploy) CleanUpEvents() error {
 	return nil
 }

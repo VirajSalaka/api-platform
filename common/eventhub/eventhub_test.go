@@ -331,6 +331,50 @@ func TestMultipleSubscribers(t *testing.T) {
 	}
 }
 
+func TestUnsubscribeRemovesOnlySpecificSubscriber(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger()
+
+	backend := NewSQLBackend(db, logger, DefaultSQLBackendConfig())
+	require.NoError(t, backend.prepareStatements())
+	t.Cleanup(func() {
+		_ = backend.Close()
+	})
+
+	require.NoError(t, backend.RegisterGateway("test-org"))
+
+	ch1, err := backend.Subscribe("test-org")
+	require.NoError(t, err)
+	ch2, err := backend.Subscribe("test-org")
+	require.NoError(t, err)
+
+	require.NoError(t, backend.Unsubscribe("test-org", ch1))
+
+	select {
+	case _, ok := <-ch1:
+		assert.False(t, ok)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for unsubscribed channel to close")
+	}
+
+	event := Event{
+		OriginatedTimestamp: time.Now(),
+		EventType:           EventTypeAPI,
+		Action:              "UPDATE",
+		EntityID:            "api-specific-unsub",
+		EventData:           "{}",
+	}
+	require.NoError(t, backend.Publish("test-org", event))
+	backend.pollGateways()
+
+	select {
+	case received := <-ch2:
+		assert.Equal(t, "api-specific-unsub", received.EntityID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for event on remaining subscriber")
+	}
+}
+
 func TestGracefulShutdown(t *testing.T) {
 	db := setupTestDB(t)
 	logger := testLogger()

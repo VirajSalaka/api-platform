@@ -84,6 +84,10 @@ func (m *mockEventHub) Subscribe(orgID string) (<-chan eventhub.Event, error) {
 	return ch, nil
 }
 
+func (m *mockEventHub) Unsubscribe(orgID string, subscriber <-chan eventhub.Event) error { return nil }
+
+func (m *mockEventHub) UnsubscribeAll(orgID string) error { return nil }
+
 func (m *mockEventHub) CleanUpEvents() error { return nil }
 
 func (m *mockEventHub) Close() error { return nil }

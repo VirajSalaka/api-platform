@@ -68,6 +68,14 @@ func (h *eventHub) Subscribe(gatewayID string) (<-chan Event, error) {
 	return h.backend.Subscribe(gatewayID)
 }
 
+func (h *eventHub) Unsubscribe(gatewayID string, subscriber <-chan Event) error {
+	return h.backend.Unsubscribe(gatewayID, subscriber)
+}
+
+func (h *eventHub) UnsubscribeAll(gatewayID string) error {
+	return h.backend.UnsubscribeAll(gatewayID)
+}
+
 func (h *eventHub) CleanUpEvents() error {
 	return h.backend.Cleanup(h.config.RetentionPeriod)
 }

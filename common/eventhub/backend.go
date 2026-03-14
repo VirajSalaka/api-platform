@@ -32,8 +32,10 @@ type EventhubImpl interface {
 	Publish(gatewayID string, event Event) error
 	// Subscribe subscribes to events for a gateway, returning a channel.
 	Subscribe(gatewayID string) (<-chan Event, error)
-	// Unsubscribe removes a subscription for a gateway.
-	Unsubscribe(gatewayID string) error
+	// Unsubscribe removes a specific subscription for a gateway.
+	Unsubscribe(gatewayID string, subscriber <-chan Event) error
+	// UnsubscribeAll removes all subscriptions for a gateway.
+	UnsubscribeAll(gatewayID string) error
 	// Cleanup removes events older than the retention period
 	Cleanup(retentionPeriod time.Duration) error
 	// CleanupRange removes events in a time range for a gateway.

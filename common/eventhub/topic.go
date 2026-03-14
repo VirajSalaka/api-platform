@@ -27,6 +27,7 @@ import (
 var (
 	ErrGatewayNotFound      = errors.New("gateway not found")
 	ErrGatewayAlreadyExists = errors.New("gateway already exists")
+	ErrSubscriberNotFound   = errors.New("subscriber not found")
 )
 
 // gateway tracks a gateway and its subscribers.
@@ -90,6 +91,46 @@ func (r *gatewayRegistry) addSubscriber(gatewayID string, ch chan Event) error {
 
 	gw.subscribers = append(gw.subscribers, ch)
 	return nil
+}
+
+// removeSubscriber removes a subscriber channel for a gateway.
+func (r *gatewayRegistry) removeSubscriber(gatewayID string, subscriber <-chan Event) (chan Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	gw, exists := r.gateways[gatewayID]
+	if !exists {
+		return nil, ErrGatewayNotFound
+	}
+
+	for i, ch := range gw.subscribers {
+		if (<-chan Event)(ch) != subscriber {
+			continue
+		}
+
+		last := len(gw.subscribers) - 1
+		gw.subscribers[i] = gw.subscribers[last]
+		gw.subscribers[last] = nil
+		gw.subscribers = gw.subscribers[:last]
+		return ch, nil
+	}
+
+	return nil, ErrSubscriberNotFound
+}
+
+// removeAllSubscribers removes and returns all subscriber channels for a gateway.
+func (r *gatewayRegistry) removeAllSubscribers(gatewayID string) ([]chan Event, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	gw, exists := r.gateways[gatewayID]
+	if !exists {
+		return nil, ErrGatewayNotFound
+	}
+
+	subscribers := gw.subscribers
+	gw.subscribers = nil
+	return subscribers, nil
 }
 
 // getAll returns all registered gateways.
