@@ -385,6 +385,7 @@ func (s *APIDeploymentService) DeployAPIConfiguration(params APIDeploymentParams
 			slog.String("correlation_id", params.CorrelationID))
 	}
 
+	// TODO: (VirajSalaka) Decide how to handle if event hub publish fails. 
 	// Publish event to event hub for multi-replica sync
 	if isUpdate {
 		s.publishEvent(eventhub.EventTypeAPI, "UPDATE", apiID, params.CorrelationID, params.Logger)
