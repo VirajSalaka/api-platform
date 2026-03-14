@@ -209,5 +209,7 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY (gateway_id) REFERENCES gateway_states(gateway_id) ON DELETE CASCADE
 );
 
+CREATE INDEX IF NOT EXISTS idx_events_gateway_id_processed_timestamp ON events(gateway_id, processed_timestamp);
+
 -- Set schema version to 10 (added gateway_states and events tables for multi-replica sync)
 PRAGMA user_version = 10;
