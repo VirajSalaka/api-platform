@@ -114,18 +114,11 @@ func (l *EventListener) handleAPIKeyUpsert(event eventhub.Event) {
 	}
 
 	if err := l.store.StoreAPIKey(apiKey); err != nil {
-		existing, getErr := l.store.GetAPIKeyByID(apiKey.APIId, apiKey.ID)
-		if getErr == nil && existing != nil {
-			l.logger.Debug("API key already exists in memory store, skipping duplicate create event",
-				slog.String("api_key_id", keyID),
-				slog.String("api_id", apiKey.APIId))
-		} else {
-			l.logger.Error("Failed to store API key in memory store",
-				slog.String("api_key_id", keyID),
-				slog.String("api_id", apiKey.APIId),
-				slog.Any("error", err))
-			return
-		}
+		l.logger.Error("Failed to store API key in memory store",
+			slog.String("api_key_id", keyID),
+			slog.String("api_id", apiKey.APIId),
+			slog.Any("error", err))
+		return
 	}
 
 	cfg, err := l.syncAPIConfigForAPIKeyEvent(apiKey.APIId)
