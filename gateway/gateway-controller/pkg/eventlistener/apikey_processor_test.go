@@ -218,114 +218,110 @@ func TestHandleEvent_APIKeyCreate_SyncsMemoryAndXDS(t *testing.T) {
 	}
 }
 
-func TestHandleEvent_APIKeyUpdateActions_SyncsMemoryAndXDS(t *testing.T) {
-	for _, action := range []string{"UPDATE", "REGENERATE"} {
-		t.Run(action, func(t *testing.T) {
-			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-			store := storage.NewConfigStore()
-			db := setupSQLiteDBForEventListenerTests(t)
-			xdsManager := &mockAPIKeyXDSManager{}
+func TestHandleEvent_APIKeyUpdate_SyncsMemoryAndXDS(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store := storage.NewConfigStore()
+	db := setupSQLiteDBForEventListenerTests(t)
+	xdsManager := &mockAPIKeyXDSManager{}
 
-			handle := "test-api-handle"
-			apiID := "test-api-id"
+	handle := "test-api-handle"
+	apiID := "test-api-id"
 
-			var spec api.APIConfiguration_Spec
-			err := spec.FromAPIConfigData(api.APIConfigData{
-				DisplayName: "Test API",
-				Version:     "v1.0.0",
-				Context:     "/test",
-				Upstream: struct {
-					Main    api.Upstream  `json:"main" yaml:"main"`
-					Sandbox *api.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
-				}{
-					Main: api.Upstream{Url: ptr("https://example.com")},
-				},
-				Operations: []api.Operation{
-					{
-						Method: "GET",
-						Path:   "/",
-					},
-				},
-			})
-			require.NoError(t, err)
+	var spec api.APIConfiguration_Spec
+	err := spec.FromAPIConfigData(api.APIConfigData{
+		DisplayName: "Test API",
+		Version:     "v1.0.0",
+		Context:     "/test",
+		Upstream: struct {
+			Main    api.Upstream  `json:"main" yaml:"main"`
+			Sandbox *api.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+		}{
+			Main: api.Upstream{Url: ptr("https://example.com")},
+		},
+		Operations: []api.Operation{
+			{
+				Method: "GET",
+				Path:   "/",
+			},
+		},
+	})
+	require.NoError(t, err)
 
-			cfg := &models.StoredConfig{
-				ID:   apiID,
-				Kind: string(api.RestApi),
-				Configuration: api.APIConfiguration{
-					ApiVersion: api.APIConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
-					Kind:       api.RestApi,
-					Metadata: api.Metadata{
-						Name: handle,
-					},
-					Spec: spec,
-				},
-				SourceConfiguration: api.APIConfiguration{
-					ApiVersion: api.APIConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
-					Kind:       api.RestApi,
-					Metadata: api.Metadata{
-						Name: handle,
-					},
-					Spec: spec,
-				},
-				Status:    models.StatusPending,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
-			}
-			require.NoError(t, db.SaveConfig(cfg))
+	cfg := &models.StoredConfig{
+		ID:   apiID,
+		Kind: string(api.RestApi),
+		Configuration: api.APIConfiguration{
+			ApiVersion: api.APIConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
+			Kind:       api.RestApi,
+			Metadata: api.Metadata{
+				Name: handle,
+			},
+			Spec: spec,
+		},
+		SourceConfiguration: api.APIConfiguration{
+			ApiVersion: api.APIConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
+			Kind:       api.RestApi,
+			Metadata: api.Metadata{
+				Name: handle,
+			},
+			Spec: spec,
+		},
+		Status:    models.StatusPending,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	require.NoError(t, db.SaveConfig(cfg))
 
-			apiKey := &models.APIKey{
-				ID:           "api-key-id-1",
-				Name:         "test-key",
-				DisplayName:  "Updated Key",
-				APIKey:       "hashed-key-value",
-				MaskedAPIKey: "***updated-key",
-				APIId:        apiID,
-				Operations:   "[\"*\"]",
-				Status:       models.APIKeyStatusActive,
-				CreatedAt:    time.Now(),
-				CreatedBy:    "test-user",
-				UpdatedAt:    time.Now(),
-				Source:       "external",
-			}
-			require.NoError(t, db.SaveAPIKey(apiKey))
+	apiKey := &models.APIKey{
+		ID:           "api-key-id-1",
+		Name:         "test-key",
+		DisplayName:  "Updated Key",
+		APIKey:       "hashed-key-value",
+		MaskedAPIKey: "***updated-key",
+		APIId:        apiID,
+		Operations:   "[\"*\"]",
+		Status:       models.APIKeyStatusActive,
+		CreatedAt:    time.Now(),
+		CreatedBy:    "test-user",
+		UpdatedAt:    time.Now(),
+		Source:       "external",
+	}
+	require.NoError(t, db.SaveAPIKey(apiKey))
 
-			listener := &EventListener{
-				store:            store,
-				db:               db,
-				apiKeyXDSManager: xdsManager,
-				logger:           logger,
-				systemConfig: &config.Config{
-					Router: config.RouterConfig{
-						GatewayHost: "localhost",
-					},
-				},
-			}
+	listener := &EventListener{
+		store:            store,
+		db:               db,
+		apiKeyXDSManager: xdsManager,
+		logger:           logger,
+		systemConfig: &config.Config{
+			Router: config.RouterConfig{
+				GatewayHost: "localhost",
+			},
+		},
+	}
 
-			listener.handleEvent(eventhub.Event{
-				EventType: eventhub.EventTypeAPIKey,
-				Action:    action,
-				EntityID:  eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
-				EventID:   "corr-apikey-upsert",
-			})
+	listener.handleEvent(eventhub.Event{
+		EventType: eventhub.EventTypeAPIKey,
+		Action:    "UPDATE",
+		EntityID:  eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
+		EventID:   "corr-apikey-upsert",
+	})
 
-			storedKey, err := store.GetAPIKeyByName(apiID, "test-key")
-			require.NoError(t, err)
-			assert.Equal(t, apiKey.ID, storedKey.ID)
-			assert.Equal(t, apiKey.DisplayName, storedKey.DisplayName)
+	storedKey, err := store.GetAPIKeyByName(apiID, "test-key")
+	require.NoError(t, err)
+	assert.Equal(t, apiKey.ID, storedKey.ID)
+	assert.Equal(t, apiKey.DisplayName, storedKey.DisplayName)
 
-			if assert.Len(t, xdsManager.calls, 1) {
-				assert.Equal(t, apiID, xdsManager.calls[0].apiID)
-				assert.Equal(t, "Test API", xdsManager.calls[0].apiName)
-				assert.Equal(t, "v1.0.0", xdsManager.calls[0].apiVersion)
-				assert.Equal(t, apiKey.ID, xdsManager.calls[0].apiKeyID)
-				assert.Equal(t, "corr-apikey-upsert", xdsManager.calls[0].correlationID)
-			}
-		})
+	if assert.Len(t, xdsManager.calls, 1) {
+		assert.Equal(t, apiID, xdsManager.calls[0].apiID)
+		assert.Equal(t, "Test API", xdsManager.calls[0].apiName)
+		assert.Equal(t, "v1.0.0", xdsManager.calls[0].apiVersion)
+		assert.Equal(t, apiKey.ID, xdsManager.calls[0].apiKeyID)
+		assert.Equal(t, "corr-apikey-upsert", xdsManager.calls[0].correlationID)
 	}
 }
 
-func TestHandleEvent_APIKeyRevoke_RemovesMemoryAndXDS(t *testing.T) {
+func TestHandleEvent_APIKeyDelete_RemovesMemoryAndXDS(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := storage.NewConfigStore()
 	db := setupSQLiteDBForEventListenerTests(t)
@@ -409,9 +405,9 @@ func TestHandleEvent_APIKeyRevoke_RemovesMemoryAndXDS(t *testing.T) {
 
 	listener.handleEvent(eventhub.Event{
 		EventType: eventhub.EventTypeAPIKey,
-		Action:    "REVOKE",
+		Action:    "DELETE",
 		EntityID:  eventhub.BuildAPIKeyEntityID(apiID, apiKey.ID),
-		EventID:   "corr-apikey-revoke",
+		EventID:   "corr-apikey-delete",
 	})
 
 	_, err = store.GetAPIKeyByName(apiID, "test-key")
@@ -422,7 +418,7 @@ func TestHandleEvent_APIKeyRevoke_RemovesMemoryAndXDS(t *testing.T) {
 		assert.Equal(t, "Test API", xdsManager.revokeCalls[0].apiName)
 		assert.Equal(t, "v1.0.0", xdsManager.revokeCalls[0].apiVersion)
 		assert.Equal(t, "test-key", xdsManager.revokeCalls[0].apiKeyName)
-		assert.Equal(t, "corr-apikey-revoke", xdsManager.revokeCalls[0].correlationID)
+		assert.Equal(t, "corr-apikey-delete", xdsManager.revokeCalls[0].correlationID)
 	}
 }
 

@@ -29,9 +29,9 @@ import (
 // processAPIKeyEvent dispatches API key events by action.
 func (l *EventListener) processAPIKeyEvent(event eventhub.Event) {
 	switch event.Action {
-	case "CREATE", "UPDATE", "REGENERATE":
+	case "CREATE", "UPDATE":
 		l.handleAPIKeyUpsert(event)
-	case "REVOKE":
+	case "DELETE":
 		l.handleAPIKeyRevoke(event)
 	default:
 		l.logger.Warn("Unknown API key event action",
