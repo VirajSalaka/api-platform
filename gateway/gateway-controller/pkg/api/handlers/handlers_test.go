@@ -20,6 +20,7 @@ package handlers
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,10 +38,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wso2/api-platform/common/constants"
+	"github.com/wso2/api-platform/common/eventhub"
 	commonmodels "github.com/wso2/api-platform/common/models"
 	adminapi "github.com/wso2/api-platform/gateway/gateway-controller/pkg/adminapi/generated"
 	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/generated"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
+	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/metrics"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/policyxds"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
@@ -48,6 +53,36 @@ import (
 func init() {
 	gin.SetMode(gin.TestMode)
 }
+
+type mockEventHub struct {
+	mu     sync.Mutex
+	events []eventhub.Event
+}
+
+func (m *mockEventHub) Initialize() error { return nil }
+
+func (m *mockEventHub) RegisterGateway(gatewayID string) error { return nil }
+
+func (m *mockEventHub) PublishEvent(orgID string, event eventhub.Event) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.events = append(m.events, event)
+	return nil
+}
+
+func (m *mockEventHub) Subscribe(orgID string) (<-chan eventhub.Event, error) {
+	ch := make(chan eventhub.Event)
+	close(ch)
+	return ch, nil
+}
+
+func (m *mockEventHub) Unsubscribe(orgID string, subscriber <-chan eventhub.Event) error { return nil }
+
+func (m *mockEventHub) UnsubscribeAll(orgID string) error { return nil }
+
+func (m *mockEventHub) CleanUpEvents() error { return nil }
+
+func (m *mockEventHub) Close() error { return nil }
 
 // MockStorage implements the storage.Storage interface for testing
 type MockStorage struct {
@@ -378,6 +413,14 @@ func (m *MockStorage) DeleteCertificate(id string) error {
 	return errors.New("certificate not found")
 }
 
+func (m *MockStorage) GetDB() *sql.DB {
+	return nil
+}
+
+func (m *MockStorage) GetGatewayID() string {
+	return ""
+}
+
 func (m *MockStorage) Close() error {
 	return nil
 }
@@ -431,7 +474,11 @@ func createTestAPIServer() *APIServer {
 		},
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 		systemConfig: &config.Config{
-			Controller: config.Controller{},
+			Controller: config.Controller{
+				Server: config.ServerConfig{
+					GatewayID: "platform-gateway-id",
+				},
+			},
 			Router: config.RouterConfig{
 				GatewayHost: "localhost",
 				VHosts:      *vhosts,
@@ -445,10 +492,31 @@ func createTestAPIServer() *APIServer {
 	}
 
 	// Initialize API key service (needed for API key operations)
-	apiKeyService := utils.NewAPIKeyService(store, mockDB, nil, &server.systemConfig.APIKey)
+	apiKeyService := utils.NewAPIKeyService(store, mockDB, nil, &server.systemConfig.APIKey, nil, server.systemConfig.Controller.Server.GatewayID)
 	server.apiKeyService = apiKeyService
 
 	return server
+}
+
+func setupSQLiteDBForHandlerTests(t *testing.T) storage.Storage {
+	t.Helper()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	metrics.Init()
+
+	dbPath := filepath.Join(t.TempDir(), "handlers-test.db")
+	db, err := storage.NewStorage(storage.BackendConfig{
+		Type:       "sqlite",
+		SQLitePath: dbPath,
+		GatewayID:  "platform-gateway-id",
+	}, logger)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	return db
 }
 
 // createTestContext creates a Gin context for testing
@@ -986,6 +1054,51 @@ func TestUpdateAPINoDB(t *testing.T) {
 	server.UpdateAPI(c, "test")
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+func TestUpdateAPIPublishesEventWithoutMutatingMemoryStore(t *testing.T) {
+	server := createTestAPIServer()
+	server.db = setupSQLiteDBForHandlerTests(t)
+
+	hub := &mockEventHub{}
+	server.deploymentService = utils.NewAPIDeploymentService(server.store, server.db, server.validator, server.routerConfig, hub, server.systemConfig.Controller.Server.GatewayID)
+
+	storeCfg := createTestStoredConfig("test-id", "test-api", "v1.0.0", "/test")
+	dbCfg := createTestStoredConfig("test-id", "test-api", "v1.0.0", "/test")
+	require.NoError(t, server.store.Add(storeCfg))
+	require.NoError(t, server.db.SaveConfig(dbCfg))
+
+	body := []byte(`{
+		"apiVersion": "gateway.api-platform.wso2.com/v1alpha1",
+		"kind": "RestApi",
+		"metadata": {"name": "test-id"},
+		"spec": {
+			"displayName": "test-api",
+			"version": "v1.0.0",
+			"context": "/updated",
+			"upstream": {"main": {"url": "http://backend.com"}},
+			"operations": [{"method": "GET", "path": "/"}]
+		}
+	}`)
+	c, w := createTestContextWithHeader("PUT", "/apis/test-id", body, map[string]string{
+		"Content-Type": "application/json",
+	})
+	server.UpdateAPI(c, "test-id")
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	updatedInDB, err := server.db.GetConfig("test-id")
+	require.NoError(t, err)
+	assert.Equal(t, "/updated", updatedInDB.GetContext())
+
+	storedInMemory, err := server.store.Get("test-id")
+	require.NoError(t, err)
+	assert.Equal(t, "/test", storedInMemory.GetContext())
+
+	require.Len(t, hub.events, 1)
+	assert.Equal(t, eventhub.EventTypeAPI, hub.events[0].EventType)
+	assert.Equal(t, "UPDATE", hub.events[0].Action)
+	assert.Equal(t, "test-id", hub.events[0].EntityID)
 }
 
 // TestUpdateAPIHandleMismatch tests UpdateAPI with handle mismatch
