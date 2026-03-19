@@ -394,6 +394,7 @@ func main() {
 			db,
 			snapshotManager,
 			apiKeyXDSManager,
+			lazyResourceXDSManager,
 			policyManager,
 			&cfg.Router,
 			log,

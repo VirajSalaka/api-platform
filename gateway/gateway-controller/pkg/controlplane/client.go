@@ -200,6 +200,9 @@ func NewClient(
 		policyVersionResolver,
 		policyValidator,
 	)
+	if eventHubInstance != nil {
+		client.llmDeploymentService.SetEventHub(eventHubInstance, gatewayID)
+	}
 
 	client.mcpDeploymentService = utils.NewMCPDeploymentService(
 		store,
@@ -1725,11 +1728,13 @@ func (c *Client) handleLLMProviderDeployedEvent(event map[string]interface{}) {
 		return
 	}
 
-	// Update policy engine xDS snapshot (best-effort)
-	if err := c.updatePolicyForDeployment(providerID, deployedEvent.CorrelationID, result); err != nil {
-		c.sendDeploymentAck(deployedEvent.Payload.DeploymentID, providerID, "llmprovider", "deploy", "failed",
-			deployedEvent.Payload.PerformedAt, "GATEWAY_PROCESSING_ERROR")
-		return
+	// In event-driven mode, the EventListener owns local policy convergence.
+	if c.eventHub == nil {
+		if err := c.updatePolicyForDeployment(providerID, deployedEvent.CorrelationID, result); err != nil {
+			c.sendDeploymentAck(deployedEvent.Payload.DeploymentID, providerID, "llmprovider", "deploy", "failed",
+				deployedEvent.Payload.PerformedAt, "GATEWAY_PROCESSING_ERROR")
+			return
+		}
 	}
 
 	c.sendDeploymentAck(deployedEvent.Payload.DeploymentID, providerID, "llmprovider", "deploy", "success",
