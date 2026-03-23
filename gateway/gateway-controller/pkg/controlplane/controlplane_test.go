@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/wso2/api-platform/common/eventhub"
+	api "github.com/wso2/api-platform/gateway/gateway-controller/pkg/api/management"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/config"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/models"
 	"github.com/wso2/api-platform/gateway/gateway-controller/pkg/storage"
@@ -568,6 +569,98 @@ func TestClient_handleAPIUndeployedEvent(t *testing.T) {
 		"correlationId": "corr-789",
 	}
 	client.handleAPIUndeployedEvent(event)
+}
+
+func TestClient_handleMCPProxyUndeploymentEvent_PublishesReplicaSyncUpdate(t *testing.T) {
+	client := createTestClient(t)
+	db := client.db.(*mockStorageForDeletion)
+	hub := client.eventHub.(*mockControlPlaneEventHub)
+	contextPath := "/mcp"
+	upstreamURL := "https://example.com"
+
+	cfg := &models.StoredConfig{
+		UUID:        "mcp-123",
+		Kind:        string(api.Mcp),
+		Handle:      "test-mcp",
+		DisplayName: "Test MCP",
+		Version:     "v1.0.0",
+		Configuration: api.RestAPI{
+			Kind:     api.RestApi,
+			Metadata: api.Metadata{Name: "test-mcp"},
+			Spec: api.APIConfigData{
+				DisplayName: "Test MCP",
+				Version:     "v1.0.0",
+				Context:     "/mcp",
+				Upstream: struct {
+					Main    api.Upstream  `json:"main" yaml:"main"`
+					Sandbox *api.Upstream `json:"sandbox,omitempty" yaml:"sandbox,omitempty"`
+				}{
+					Main: api.Upstream{Url: &upstreamURL},
+				},
+				Operations: []api.Operation{
+					{Method: api.OperationMethodGET, Path: "/"},
+				},
+			},
+		},
+		SourceConfiguration: api.MCPProxyConfiguration{
+			ApiVersion: api.MCPProxyConfigurationApiVersionGatewayApiPlatformWso2Comv1alpha1,
+			Kind:       api.Mcp,
+			Metadata:   api.Metadata{Name: "test-mcp"},
+			Spec: api.MCPProxyConfigData{
+				DisplayName: "Test MCP",
+				Version:     "v1.0.0",
+				Context:     &contextPath,
+				Upstream: api.MCPProxyConfigData_Upstream{
+					Url: &upstreamURL,
+				},
+			},
+		},
+		Status:    models.StatusPending,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	db.SaveConfig(cfg)
+	_ = client.store.Add(cfg)
+
+	event := map[string]interface{}{
+		"type":          "mcpproxy.undeployed",
+		"payload":       map[string]interface{}{"proxyId": cfg.UUID},
+		"timestamp":     "2025-01-30T12:00:00Z",
+		"correlationId": "corr-mcp-undeploy",
+	}
+	client.handleMCPProxyUndeploymentEvent(event)
+
+	if len(hub.publishedEvents) != 1 {
+		t.Fatalf("expected 1 MCP replica-sync event, got %d", len(hub.publishedEvents))
+	}
+	if hub.publishedEvents[0].event.EventType != eventhub.EventTypeMCPProxy {
+		t.Fatalf("expected MCP proxy event type, got %s", hub.publishedEvents[0].event.EventType)
+	}
+	if hub.publishedEvents[0].event.Action != "UPDATE" {
+		t.Fatalf("expected UPDATE action, got %s", hub.publishedEvents[0].event.Action)
+	}
+	if hub.publishedEvents[0].event.EntityID != cfg.UUID {
+		t.Fatalf("expected entity id %s, got %s", cfg.UUID, hub.publishedEvents[0].event.EntityID)
+	}
+	if hub.publishedEvents[0].event.EventID != "corr-mcp-undeploy" {
+		t.Fatalf("expected correlation id corr-mcp-undeploy, got %s", hub.publishedEvents[0].event.EventID)
+	}
+
+	stored, err := db.GetConfig(cfg.UUID)
+	if err != nil {
+		t.Fatalf("expected stored MCP config after undeploy: %v", err)
+	}
+	if stored.Status != models.StatusUndeployed {
+		t.Fatalf("expected DB status undeployed, got %s", stored.Status)
+	}
+
+	inMemory, err := client.store.Get(cfg.UUID)
+	if err != nil {
+		t.Fatalf("expected MCP config to remain in memory until event replay: %v", err)
+	}
+	if inMemory.Status != models.StatusPending {
+		t.Fatalf("expected in-memory status to remain pending until replay, got %s", inMemory.Status)
+	}
 }
 
 func TestClient_ConcurrentStateAccess(t *testing.T) {
