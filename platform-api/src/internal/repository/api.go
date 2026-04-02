@@ -136,7 +136,10 @@ func (r *APIRepo) GetAPIByUUID(apiUUID, orgUUID string) (*model.API, error) {
 
 	// Parse transport JSON
 	if transportJSON != "" {
-		json.Unmarshal([]byte(transportJSON), &api.Transport)
+		err := json.Unmarshal([]byte(transportJSON), &api.Transport)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal transport: %w", err)
+		}
 	}
 	if config, err := deserializeAPIConfigurations(configJSON); err != nil {
 		return nil, err
@@ -233,7 +236,10 @@ func (r *APIRepo) GetAPIsByProjectUUID(projectUUID, orgUUID string) ([]*model.AP
 
 		// Parse transport JSON
 		if transportJSON != "" {
-			json.Unmarshal([]byte(transportJSON), &api.Transport)
+			err := json.Unmarshal([]byte(transportJSON), &api.Transport)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal transport: %w", err)
+			}
 		}
 		if config, err := deserializeAPIConfigurations(configJSON); err != nil {
 			return nil, err
@@ -299,7 +305,10 @@ func (r *APIRepo) GetAPIsByOrganizationUUID(orgUUID string, projectUUID string) 
 
 		// Parse transport JSON
 		if transportJSON != "" {
-			json.Unmarshal([]byte(transportJSON), &api.Transport)
+			err := json.Unmarshal([]byte(transportJSON), &api.Transport)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal transport: %w", err)
+			}
 		}
 		if config, err := deserializeAPIConfigurations(configJSON); err != nil {
 			return nil, err
