@@ -431,9 +431,10 @@ func (s *Server) Start(port string, certDir string) error {
 
 	address := fmt.Sprintf(":%s", port)
 	httpServer := &http.Server{
-		Addr:      address,
-		Handler:   s.router,
-		TLSConfig: tlsConfig,
+		Addr:              address,
+		Handler:           s.router,
+		TLSConfig:         tlsConfig,
+		ReadHeaderTimeout: 30 * time.Second,
 	}
 
 	s.logger.Info("Starting HTTPS server", "address", "https://localhost:"+port)

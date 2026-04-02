@@ -158,7 +158,8 @@ func (db *DB) InitSchema(dbSchemaPath string, slogger *slog.Logger) error {
 		}
 	}
 
-	// Read the schema SQL from the external file
+	// Read the schema SQL from the external file.
+	// #nosec G304 -- schemaPath comes from trusted startup config and the filename is constrained to a fixed driver-specific schema file.
 	schemaSQL, err := os.ReadFile(schemaPath)
 	if err != nil {
 		return fmt.Errorf("failed to read schema file %s: %w", schemaPath, err)

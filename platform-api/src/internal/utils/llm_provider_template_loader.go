@@ -101,6 +101,7 @@ func LoadLLMProviderTemplatesFromDirectory(dirPath string) ([]*model.LLMProvider
 		}
 
 		filePath := filepath.Join(dirPath, name)
+		// #nosec G304 -- filePath is built from a trusted startup-configured directory plus names returned by os.ReadDir for that directory.
 		content, readErr := os.ReadFile(filePath)
 		if readErr != nil {
 			return nil, fmt.Errorf("failed to read template file %s: %w", filePath, readErr)
