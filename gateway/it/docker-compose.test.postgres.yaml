@@ -72,8 +72,8 @@ services:
   gateway-controller:
     container_name: it-gateway-controller
     image: ghcr.io/wso2/api-platform/gateway-controller-coverage:test
-    mem_limit: 1000m
-    mem_reservation: 1000m
+    mem_limit: 500m
+    mem_reservation: 500m
     cpus: 0.5
     command: ["-config", "/etc/gateway-controller/config.toml"]
     ports:
@@ -125,8 +125,8 @@ services:
   gateway-controller-runtime:
     container_name: it-gateway-controller-runtime
     image: ghcr.io/wso2/api-platform/gateway-controller-coverage:test
-    mem_limit: 1000m
-    mem_reservation: 1000m
+    mem_limit: 500m
+    mem_reservation: 500m
     cpus: 0.5
     command: ["-config", "/etc/gateway-controller/config.toml"]
     environment:
@@ -164,7 +164,7 @@ services:
     container_name: it-gateway-runtime
     image: ghcr.io/wso2/api-platform/gateway-runtime-coverage:test
     mem_limit: 2000m
-    mem_reservation: 2000m
+    mem_reservation: 1500m
     cpus: 1
     command: ["--pol.config", "/etc/policy-engine/config.toml"]
     ports:
