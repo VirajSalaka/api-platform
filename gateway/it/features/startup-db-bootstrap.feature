@@ -150,7 +150,7 @@ Feature: Startup DB Bootstrap
     And the response should be valid JSON
     And the JSON response field "result.content[0].text" should contain "The sum of 40 and 60 is 100."
 
-    When I restart the "gateway-controller" service
+    When I restart the "gateway-controller-runtime" service
     And I wait for the endpoint "http://localhost:8080/startup-db-llm/chat/completions" to be ready with method "POST" and body '{"model":"gpt-4","messages":[{"role":"user","content":"after restart warmup"}]}'
     And I wait for the endpoint "http://localhost:8080/startup-db-proxy/chat/completions" to be ready with method "POST" and body '{"model":"gpt-4","messages":[{"role":"user","content":"proxy after restart warmup"}]}'
     And I wait for the endpoint "http://localhost:8080/startup-db-rest/v1.0/us/seattle" to be ready
