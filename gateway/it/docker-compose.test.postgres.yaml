@@ -129,6 +129,11 @@ services:
     mem_reservation: 500m
     cpus: 0.5
     command: ["-config", "/etc/gateway-controller/config.toml"]
+    ports:
+      # Admin API only. The IT sends management REST calls to gateway-controller
+      # above; this port is exposed solely so the policy-snapshot xDS-sync probe
+      # can query the version of the controller that actually feeds gateway-runtime.
+      - "9093:9092"
     environment:
       - APIP_GW_CONTROLLER_STORAGE_TYPE=postgres
       - APIP_GW_CONTROLLER_STORAGE_POSTGRES_HOST=postgres
