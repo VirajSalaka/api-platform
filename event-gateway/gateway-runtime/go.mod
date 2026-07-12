@@ -15,7 +15,7 @@ require (
 	github.com/wso2/api-platform/common v0.0.0
 	github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine v0.0.0-00010101000000-000000000000
 	github.com/wso2/api-platform/sdk/core v0.2.15
-	google.golang.org/grpc v1.81.1
+	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 )
